@@ -4,8 +4,8 @@ A browser extension that takes a Chinese web novel chapter on a supported
 site, translates it with a **local model through Ollama**, and replaces the
 Chinese text with English directly on the page, paragraph by paragraph.
 
-> **Status: Milestones 0–2 done. Next is Milestone 3, in-place
-> replacement.** This document is
+> **Status: Milestones 0–3 done. Next is Milestone 4, chapter flow and
+> caching.** This document is
 > written the way [JP Subs' design doc](../Translator%20Project/translator-design.md)
 > ended up, not the way it started: predictions are kept next to their
 > corrections rather than silently replaced, and every claim below is either
@@ -20,7 +20,7 @@ Chinese text with English directly on the page, paragraph by paragraph.
 | 0 — Scope, one site | **Done.** Qidian chosen after Fanqie was tested and rejected (§0). Adapter built and tested against a real chapter. |
 | 1 — Translate MVP, no live overlay | **Done.** CLI: 54/54 paragraphs, 0 failures (§1.4). Extension: failed on first load (static imports in a content script), fixed, then translated a live chapter end to end into the reader tab (§1.5). Quality is *fluent*, not checked *accurate* — see §Questions. |
 | 2 — Glossary system | **Done.** Per-novel storage, existing-entries-win merge, hand edits and deletions that stick, a popup editor, and a fixture exporter. Three defects in the first version found and fixed (§2.3), the worst being that every glossary key came back in pinyin, which silently disabled the merge rule. Hand edits verified reaching the translation (§2.4). Across two real chapters, all 6 recurring terms kept chapter 1's rendering (§2.5). Not yet seen: storage overriding a *naturally* conflicting proposal between chapters. |
-| 3 — Live in-place replacement | **Not built.** Real open question found during scoping, not present in JP Subs: Qidian is a Vue SPA, and a framework re-render could silently wipe a DOM-injected translation. See §3. |
+| 3 — Live in-place replacement | **Done.** Paragraphs replaced as each chunk finishes, original/English toggle, on-page progress with Stop, run state owned by the background (no more popup resets or duplicate runs). The Vue re-render risk was checked first (0 page mutations from scroll, night mode, idle) and guarded anyway; the guard's own simulation caught a bug that stripped paragraph indentation (§3.2). Found: Qidian marks its pages `notranslate` (§3.4). |
 | 4 — Chapter flow and caching | **Not built.** Design notes only, §4. |
 | 5 — Fallback polish, second site | **Half-built by accident.** The Milestone 1 reader tab (`src/reader.html`) already **is** the fallback view Milestone 5 asks for — it just isn't wired to trigger automatically yet. Second site: not started. |
 | 6 — Stretch: JP/KR | **Not started, deliberately.** `core/prompt.js` is already shaped to take a second language as a data addition, the way JP Subs' Korean support was — see §6. |
@@ -518,21 +518,40 @@ look back over.
 
 ## Milestone 3 — Live in-place replacement
 
-**Not built.** Design notes and one real risk that JP Subs' overlay-based
-approach never had to face.
+**Done (0.3.0).** Tested first against a live Qidian page with the real
+content script and stubbed extension APIs, then clicked through as an
+installed extension with a real model run (2026-09-28): replacement,
+toggle and the new popup behaviour all worked as intended.
 
-### 3.1 The mechanism, as planned
+**One measurement did not come back.** The guard's `re-applied` count
+(§3.2) was meant to be read from the console, and opening DevTools on
+Qidian closed the user's other tabs — most likely the site's own
+anti-debugging scripts, not verified. The count is now shown in the popup
+instead, so the question stays self-measuring without DevTools.
 
-`extractChapter()` already returns each paragraph's live DOM element (`el`)
-alongside its text — kept specifically for this milestone, stripped out by
-`toPayload()` only when a chapter needs to cross the content-script/
-service-worker message boundary (§1.5). In-place replacement is meant to run
-entirely inside `content.js`, paragraph by paragraph, using
-`pipeline.translateUnits()`'s `onProgress` callback to swap each paragraph's
-text as its translation arrives — this is the direct reason
-`translateUnits()` reports progress after every chunk rather than only at
-the end (ported from JP Subs' "progressive, not blocking" delivery, §4.1
-there).
+### 3.1 The mechanism, as built
+
+The background runs the pipeline and, after every chunk, sends the whole
+translations-so-far array to the tab (`replace:progress`). The content
+script writes each newly arrived paragraph into the page as it lands, so the
+top of the chapter is readable while the rest is still translating — the
+reason `translateUnits()` reports progress per chunk rather than at the end.
+
+**Only text is changed, never structure.** Each paragraph's own direct text
+nodes are rewritten by setting `nodeValue`; nodes are never replaced,
+removed, or re-created. Vue's virtual DOM holds references to those exact
+nodes, and swapping one out is how a later re-render would lose track of a
+paragraph. The sibling `span.review` comment badge is left alone — measured:
+108 badges before replacement, 108 after.
+
+**Run state moved out of the popup** (the Build Order item found in first
+use). The background owns one run per tab: a second Translate click while
+one is running is refused; Stop aborts the in-flight Ollama request, not
+just the next chunk; navigating the tab to another chapter or closing it
+stops the run. The popup is now only a view — it polls the run state once a
+second while open, so reopening it mid-run shows progress instead of a
+reset. The page carries its own progress pill with Stop and an
+Original/English toggle, in a shadow root so Qidian's CSS cannot restyle it.
 
 ### 3.2 A risk JP Subs never had: framework re-render
 
@@ -549,23 +568,87 @@ reason after a translation has been written in — a font-size setting
 toggled, a "load next chapter inline" feature, anything that touches the
 component's own state — a plain `textContent` write is exactly the kind of
 DOM mutation a virtual-DOM diff doesn't know about and can silently
-overwrite. This has not been tested. It is the single largest open technical
-risk in this milestone, worth checking early and cheaply (translate one
-paragraph, toggle an unrelated page setting, see if the translation
-survives) rather than discovering it after the rest of the milestone is
-built.
+overwrite.
+
+**Checked first, before building, 2026-09-28** — three marker strings
+written into paragraphs of a live 九君齐天 chapter, with a MutationObserver
+counting every change the page made afterwards:
+
+| Trigger | Page mutations | Markers surviving |
+|---|---|---|
+| Scrolling to the bottom, twice | 0 | 3/3 |
+| Night mode toggled | 0 | 3/3 |
+| Idle | 0 | 3/3 |
+| Reader settings (font size) | **not exercised** — the panel's controls could not be located from a script, and screenshots timed out | — |
+
+The same check settled a second question: **Qidian does not load the next
+chapter into the same page.** Scrolling to the bottom added nothing and left
+the URL unchanged, so one page is one chapter — which also simplifies
+Milestone 4's navigation detection (§4).
+
+Since the settings panel stayed untested, the content script does not
+*assume* the risk away: a guard re-applies any paragraph whose text stops
+matching what it should show, and rebinds by position if the page replaces
+paragraph elements outright. Both were simulated on the live page — a
+framework-style rewrite of a text node, and a paragraph element replaced
+wholesale — and both came back to English. Each correction is counted and
+logged to the console (`re-applied N paragraph(s)`), so real use measures
+whether this risk ever fires, instead of this document guessing.
+
+> **Found by the simulation, not by reading the code.** The guard's first
+> version reported re-applying **142 paragraphs** after two progress
+> messages, with no re-render at all. The adapter trims each paragraph's
+> text, which strips the two full-width spaces (　　) Qidian indents every
+> paragraph with; the guard compared the page against the trimmed text, saw
+> every *untranslated* paragraph as reverted, and rewrote all of them
+> without their indent. The toggle back to Chinese would have done the same.
+> Fixed by keeping each paragraph's exact original text (`raw`) for
+> restoring, and using the trimmed text only for translation. After the fix:
+> 0 re-applies from the extension's own writes, all 132 untranslated
+> paragraphs byte-identical to the original, and all 152 byte-identical
+> after toggling back. The earlier check only compared trimmed text, which
+> is why it passed.
 
 ### 3.3 The original/English toggle
 
-Planned to work the way JP Subs' hide/show subtitles toggle works logically,
-but the storage shape is necessarily different: JP Subs never touched the
-original Japanese in the DOM at all — it painted English into a separate
-overlay and toggling just hid or showed that overlay. In-place replacement
-*replaces* the original text, so the toggle needs the original Chinese saved
-somewhere (`el.dataset` on each paragraph node is the obvious place) before
-the swap happens, and toggling means writing one or the other string back
-in — closer to `reader.js`'s current `show-original` class toggle (§1
-already built this once, for the fallback tab) than to JP Subs' show/hide.
+In the page's pill and in the popup. The original is kept in the content
+script's memory (`raw` per paragraph, above) rather than in `el.dataset` as
+planned: a dataset attribute is a DOM change Vue could also re-render away,
+and memory is exactly as long-lived as the replacement itself. Measured: 20
+translated paragraphs → toggle → 0 English, 152/152 original → toggle → 20
+English again.
+
+**Replacement style — full swap, not a bilingual stack**, for now. The
+toggle covers "what did this say in Chinese?" without doubling the page's
+length. The brief left this open; it stays in §Questions.
+
+### 3.4 Qidian marks its pages `notranslate`
+
+Found while testing: `<html class="notranslate">`. That is the standard
+opt-out that tells browser translators — Chrome's built-in "translate this
+page" included — not to translate the page. It is worth recording because
+this document's Design principle leans on exactly that comparison ("the same
+as a browser's built-in translate this page"). The extension does not read or
+honour the class, and nothing about it is technically enforced; but it is a
+statement of the site's preference, and whether this personal, local-only
+reading aid should respect it is a question for the person using it, not
+something to settle silently in code.
+
+**Decided, 2026-09-28: not honoured.** The user's condition: fine as long as
+nothing the extension does breaches the site's rules. What the extension
+does, stated plainly so it can be checked against those rules:
+
+- Reads only pages the user has opened in their own logged-in session.
+- Never fetches chapters on its own, never bulk-downloads, never works around
+  the paywall — a locked chapter is refused (§0.3), and scripted fetches that
+  hit Qidian's bot check were abandoned, not worked around (§2.5).
+- Keeps every translation on the user's machine; nothing is uploaded,
+  shared or republished.
+- The one place chapter text is written anywhere is the manual fixture
+  export, which saves to the user's own disk and is gitignored.
+
+Qidian's user agreement (用户协议) was not reviewed against this list — the
+user's decision, 2026-09-28. Recorded so that choice stays visible.
 
 ---
 
@@ -655,7 +738,7 @@ rate, speaker markers) before any code changed.
    stale-compound warning found by measurement (§2.4).
 6. ✅ **Two-chapter glossary run.** 九君齐天 ch. 1 → ch. 2: all 6 recurring
    terms held their chapter-1 rendering (§2.5). Milestone 2 closed.
-7. ⬜ **Run state that survives the popup closing.** Found in first real use
+7. ✅ **Run state that survives the popup closing** (0.3.0, §3.1). Found in first real use
    (2026-09-28): the popup "resets" every time it loses focus. Chrome destroys
    the popup page on close, and its "Translating…" status lived only there.
    The run itself lives in the service worker and finished fine; only the UI
@@ -667,8 +750,9 @@ rate, speaker markers) before any code changed.
    second run, a Stop button, and an on-page progress box — so this is a port,
    not new design. Belongs with Milestone 3 at the latest, since in-place
    replacement makes progress visible on the page anyway.
-8. ⬜ In-place replacement, with the Vue re-render risk (§3.2) checked
-   early and cheaply before the rest of the milestone is built on top of it.
+8. ✅ **In-place replacement** (0.3.0). Vue risk checked first, then
+   guarded (§3.2); clicked through on a real chapter. The re-render count
+   is shown in the popup.
 9. ⬜ Chapter navigation detection and local caching (§4).
 10. ⬜ Fallback routing logic connecting Milestone 3's failure cases to the
    already-built `reader.html` (§5), plus a second site adapter.
@@ -685,8 +769,10 @@ rate, speaker markers) before any code changed.
   nothing in Milestone 0–2, which only need free chapters; matters before
   claiming VIP support works.
 - **Does Vue re-rendering actually threaten an in-place text swap?** (§3.2)
-  The single largest technical risk in the next milestone, and cheap to
-  check directly before building around an assumption either way.
+  Partly answered: scrolling, night mode and idle cause no page mutations
+  at all. The reader settings panel is untested. The guard makes this
+  self-measuring — any `re-applied` count in the console during real use is
+  the answer.
 - **Is the translation actually accurate, not merely fluent?** (§1.4) Open
   the same way JP Subs left it open across its whole project — every reading
   of §1.4's output so far has been by someone who cannot check it against

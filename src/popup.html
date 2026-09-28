@@ -20,6 +20,8 @@
     .note { margin-top: 6px; font-size: 12px; color: #555; white-space: pre-wrap; }
     .note.error { color: #b00020; }
     .hint { font-size: 11px; color: #777; margin: 2px 0 6px; }
+    .row { display: flex; gap: 6px; }
+    .row button { flex: 1; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -31,7 +33,13 @@
     <label for="model">Model (Ollama)</label>
     <input id="model" value="qwen3.5:9b" />
     <button id="translate">Translate this chapter</button>
+    <div class="row">
+      <button id="stop" class="secondary" hidden>Stop</button>
+      <button id="toggle" class="secondary" hidden>Show original</button>
+      <button id="reader" class="secondary" hidden>Open in reader tab</button>
+    </div>
     <div class="note" id="status"></div>
+    <div class="hint" id="reapplied"></div>
 
     <h2>Glossary for this novel</h2>
     <div class="hint">One <code>term = English</code> per line, under a [section]. Existing entries always win over new chapters; a term you delete stays deleted.</div>

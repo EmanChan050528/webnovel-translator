@@ -29,17 +29,68 @@ async function init() {
   saved = g;
   $("glossary").value = toText(g);
   $("chapterTools").hidden = false;
+  refreshRun();
+  setInterval(refreshRun, 1000);
+}
+
+// The popup only *shows* run state; the background owns it (see
+// background.js `runs`). Polling while open is enough — the popup lives for
+// seconds at a time.
+function renderRun(run) {
+  const running = run?.status === "running";
+  $("translate").disabled = running;
+  $("stop").hidden = !running;
+  $("toggle").hidden = !run || run.done === 0 && run.status !== "done";
+  $("reader").hidden = !run?.resultId;
+
+  if (!run) return note("status", "");
+  switch (run.status) {
+    case "running":
+      return note("status", run.total
+        ? `Translating on the page: ${run.done}/${run.total} chunks. You can close this popup.`
+        : "Reading the chapter and building the glossary…");
+    case "done":
+      return note("status", `Translated ${run.translated} paragraphs on the page.`);
+    case "stopped":
+      return note("status", `Stopped. ${run.translated ? `${run.translated} paragraphs` : "What was translated"} stays on the page.`);
+    case "error":
+      return note("status", run.error || "Translation failed.", true);
+  }
+}
+
+async function refreshRun() {
+  const res = await send({ type: "run:state" });
+  if (!res?.ok) return;
+  renderRun(res.run);
+  $("reapplied").textContent = res.reapplied
+    ? `The page re-rendered over the translation ${res.reapplied} time(s); each was corrected.`
+    : res.reapplied === 0 && res.run ? "Page re-renders corrected: 0" : "";
 }
 
 $("translate").addEventListener("click", async () => {
   $("translate").disabled = true;
-  note("status", "Extracting and translating — a full chapter takes a few minutes. The result opens in a new tab even if this popup closes.");
+  note("status", "Starting…");
   const model = $("model").value.trim() || undefined;
   const res = await send({ type: "translate-active-tab", options: { model } });
-  $("translate").disabled = false;
-  if (!res?.ok) return note("status", res?.error || "Something went wrong.", true);
-  note("status", "Opened in a new tab.");
+  if (!res?.ok) {
+    $("translate").disabled = false;
+    return note("status", res?.error || "Something went wrong.", true);
+  }
+  renderRun(res.run);
 });
+
+$("stop").addEventListener("click", async () => {
+  await send({ type: "run:stop" });
+  refreshRun();
+});
+
+$("toggle").addEventListener("click", async () => {
+  const res = await send({ type: "page:toggle" });
+  if (!res?.ok) return note("status", res?.error || "Could not toggle.", true);
+  $("toggle").textContent = res.showing === "en" ? "Show original" : "Show English";
+});
+
+$("reader").addEventListener("click", () => send({ type: "reader:open" }));
 
 $("saveGlossary").addEventListener("click", async () => {
   const { categories, errors } = fromText($("glossary").value);

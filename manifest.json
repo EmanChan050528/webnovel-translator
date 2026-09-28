@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Webnovel Translator — Chinese to English, in place",
-  "description": "Translates Chinese web novel chapters into English using a local model, with a per-novel glossary you can edit.",
-  "version": "0.2.0",
+  "description": "Translates Chinese web novel chapters into English in place, using a local model, with a per-novel glossary you can edit.",
+  "version": "0.3.0",
   "permissions": [
     "activeTab",
     "storage",
