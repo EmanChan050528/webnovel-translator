@@ -4,7 +4,8 @@ A browser extension that takes a Chinese web novel chapter on a supported
 site, translates it with a **local model through Ollama**, and replaces the
 Chinese text with English directly on the page, paragraph by paragraph.
 
-> **Status: Milestone 0 done, Milestone 1 proven once.** This document is
+> **Status: Milestones 0–2 done. Next is Milestone 3, in-place
+> replacement.** This document is
 > written the way [JP Subs' design doc](../Translator%20Project/translator-design.md)
 > ended up, not the way it started: predictions are kept next to their
 > corrections rather than silently replaced, and every claim below is either
@@ -17,8 +18,8 @@ Chinese text with English directly on the page, paragraph by paragraph.
 | Milestone | State |
 |---|---|
 | 0 — Scope, one site | **Done.** Qidian chosen after Fanqie was tested and rejected (§0). Adapter built and tested against a real chapter. |
-| 1 — Translate MVP, no live overlay | **Proven once.** Full pipeline run against a real captured chapter, 54/54 paragraphs, 0 failures (§1.4). Extension shell (popup → background → reader tab) wired but not yet clicked through in a loaded browser — see the gap noted in §1.5. |
-| 2 — Glossary system | **Core built and tested**, storage and merge rule only. Seeded automatically (§1.4 proves this works). Hand-editable UI **not built** — background.js exposes the messages, popup has no editor screen yet. |
+| 1 — Translate MVP, no live overlay | **Done.** CLI: 54/54 paragraphs, 0 failures (§1.4). Extension: failed on first load (static imports in a content script), fixed, then translated a live chapter end to end into the reader tab (§1.5). Quality is *fluent*, not checked *accurate* — see §Questions. |
+| 2 — Glossary system | **Done.** Per-novel storage, existing-entries-win merge, hand edits and deletions that stick, a popup editor, and a fixture exporter. Three defects in the first version found and fixed (§2.3), the worst being that every glossary key came back in pinyin, which silently disabled the merge rule. Hand edits verified reaching the translation (§2.4). Across two real chapters, all 6 recurring terms kept chapter 1's rendering (§2.5). Not yet seen: storage overriding a *naturally* conflicting proposal between chapters. |
 | 3 — Live in-place replacement | **Not built.** Real open question found during scoping, not present in JP Subs: Qidian is a Vue SPA, and a framework re-render could silently wipe a DOM-injected translation. See §3. |
 | 4 — Chapter flow and caching | **Not built.** Design notes only, §4. |
 | 5 — Fallback polish, second site | **Half-built by accident.** The Milestone 1 reader tab (`src/reader.html`) already **is** the fallback view Milestone 5 asks for — it just isn't wired to trigger automatically yet. Second site: not started. |
@@ -93,7 +94,7 @@ text, standard system fonts (`SourceHanSansSC`, `PingFangSC`).
 | | |
 |---|---|
 | Chapter URL | `https://www.qidian.com/chapter/{bookId}/{chapterId}/` |
-| Novel title | `h1.text-rh3`, direct text |
+| Novel title | `h1.text-rh3`, direct text — **first chapter only**; falls back to the `《…》` in the tab title (found when 九君齐天 ch. 2 exported with no title) |
 | Chapter title | `h1.title`, **direct text nodes only** — see gotcha below |
 | Content root | `main.content` (its own id is literally `c-{chapterId}`) |
 | Paragraphs | `main > p > span.content-text`, direct text nodes only |
@@ -293,6 +294,11 @@ path the way §1.4 trusts the CLI path.
 > open before the extension is (re)loaded never receives manifest content
 > scripts, so the background now pings the tab and injects `content.js`
 > via `chrome.scripting` if nothing answers.
+>
+> **Second load: worked.** A live 九君齐天 chapter (152 short paragraphs)
+> translated end to end and opened in the reader tab. One UX defect found in
+> the same session — the popup forgets a running translation when it closes
+> — is recorded in the Build Order, not fixed here.
 
 ---
 
@@ -302,8 +308,9 @@ path the way §1.4 trusts the CLI path.
 
 `src/core/glossary.js`, storage- and chrome-independent (takes a
 `{get,set,remove}` object shaped like `chrome.storage.local`, so it is
-tested with a plain in-memory stub — `src/core/glossary.test.mjs`, 7 cases,
-all passing as of this writing). Ported design, new implementation:
+tested with a plain in-memory stub — `src/core/glossary.test.mjs`, 14 cases,
+all passing). Ported design, new implementation — and rewritten once, see
+§2.3 for the three defects the first version shipped with:
 
 - **Keyed by `site:novelId`**, not by title — titles collide across sites and
   occasionally within one. The brief's "per-novel, not per-channel" is
@@ -314,10 +321,22 @@ all passing as of this writing). Ported design, new implementation:
   Tested directly: chapter 1 sets 萧炎 → "Xiao Yan"; a simulated chapter 2
   proposes "Xiao Yen" for the same key; the stored value stays "Xiao Yan"
   (`glossary.test.mjs`, case 1).
-- **A hand edit outranks even that** — `applyEdit()` sets a value that then
-  survives *any* later `remember()` call, because a correction a person made
-  on purpose is ground truth, not one more chapter's opinion to blend in.
-  Also tested directly (case 2).
+- **A hand edit outranks even that** — the editor saves through
+  `replaceAll()`, and the result survives *any* later `remember()` call,
+  because a correction a person made on purpose is ground truth, not one
+  more chapter's opinion to blend in.
+- **A deletion stays deleted.** A term removed in the editor is recorded in
+  `suppressed`, and a later chapter's pass 1 proposing it again is ignored.
+  Typing it back in by hand un-suppresses it. Without this, deleting a stray
+  entry like §1.4's `"Tian"` would last exactly until the next chapter.
+- **The glossary a chapter is translated with is the merged one**, not pass
+  1's fresh output. `pipeline.run()` applies `mergeGlossaries(seed, found)`
+  — the same rule storage uses — before translating. Seeding pass 1's prompt
+  alone does not guarantee anything: the model can re-render a seeded term or
+  drop it under the per-category caps, and a hand edit that reaches storage
+  but not the translation has not actually won.
+- **Pass-1 entries not keyed in Chinese are dropped** before they reach
+  storage (`keepSourceKeys()` in `pipeline.js`) — §2.3.
 - **`editedByHand` protects a novel from the LRU prune** at 200 novels
   remembered, same rule JP Subs used for channels at 200: an edited glossary
   cost someone real effort and should not be evicted for being old.
@@ -329,23 +348,171 @@ all passing as of this writing). Ported design, new implementation:
   from a single ordinary chapter (that chapter's plot has not reached a named
   technique yet — not a bug, just this fixture's content).
 
-### 2.2 What's not built
+### 2.2 The editor
 
-- **The glossary editor UI.** `background.js` already answers
-  `glossary:get` and `glossary:edit` messages; `popup.html` has no screen
-  that calls them. This is the most next thing to build, and it's the same
-  JSON-textbox-diffed-on-save shape JP Subs' popup used for its channel
-  glossary, ready to be adapted rather than designed from scratch.
-- **Seeding from several chapters at once.** The brief describes "a first
-  pass reads a chapter (or several)." Only the single-chapter path is built;
-  `pipeline.run()`'s `analyse()` already accepts a `seed` so a
-  multi-chapter seeding pass is a caller-side loop over `remember()`, not a
-  pipeline change — but the loop itself doesn't exist yet.
-- **Reapplying a hand edit to an already-translated, cached chapter** without
-  a full re-run. JP Subs built exactly this (`glossary:apply`, its
-  `glossary-apply.test.mjs`) as a find-and-replace over already-cached
-  English text. It is directly portable once Milestone 4's cache exists —
-  there is nothing cached yet to rewrite.
+In the popup, for whichever novel the active tab belongs to (identified from
+the URL alone — `identifyNovel()` — so the editor opens even before a
+chapter has been extracted). One `term = English` per line under a
+`[names]` / `[factions]` / `[realms]` / `[techniques]` / `[terms]` heading.
+
+**Plain text, not the JSON textbox JP Subs used.** A stray comma or quote in
+hand-edited JSON loses the whole save, and this is edited in a narrow popup.
+The format lives in `src/glossary-text.js` with its own tests
+(`glossary-text.test.mjs`, 7 cases), not in the popup where a parsing mistake
+would only surface as a bad save.
+
+**A save with any error is refused whole.** This is not caution for its own
+sake: `replaceAll()` treats a missing term as a deletion, so applying only the
+lines that parsed would silently record every term on a broken line as
+deleted — and suppressed from every future chapter.
+
+**Not built, deliberately:** the per-entry diff JP Subs' editor computed on
+save, used there to rewrite already-cached subtitles in place. There is no
+cache yet to rewrite (Milestone 4). When there is, JP Subs'
+`glossary:apply` and its `glossary-apply.test.mjs` port directly.
+
+### 2.3 Three defects in the first version, found from real output
+
+The first `glossary.js` passed all seven of its tests and was wrong in three
+ways. Only one was visible in real output; the other two were found by
+reading the code while fixing it. All three are now tests.
+
+1. **Every glossary key was in pinyin or English, never Chinese.** §1.4's
+   glossary reads `"Xiao Yan": "Xiao Yan"`, `"Dou Qi": "Dou Energy"` — no
+   entry anywhere was keyed in the characters that actually appear in the
+   text. The prompt showed placeholder keys as descriptions (`"chinese
+   name"`), and the model filled them with romanisations. The consequence was
+   worse than a cosmetic one: a hand edit to `萧炎` could never collide with
+   pass 1's `Xiao Yan`, so **"existing entries win" would never have
+   triggered** — duplicates would have accumulated instead, with the merge
+   rule silently doing nothing. The tests missed it because they were written
+   with Chinese keys, i.e. with the output the prompt was *supposed* to
+   produce. Fixed twice over: the prompt now shows real Chinese example keys
+   and says outright that keys must be the characters as written, and
+   `keepSourceKeys()` drops any entry without a Han character in its key.
+   After the fix, a fresh run on the same chapter keyed all 13 entries in
+   Chinese and dropped none (§2.4).
+2. **The per-category cap could evict stored entries.** `{...add, ...base}`
+   puts the *new* keys first in insertion order, and the cap then kept the
+   first 40 — so a chapter full of new proposals could push out old entries,
+   hand edits included. Now `base` is always kept whole and new proposals
+   only fill the space left.
+3. **A deleted entry came back.** Nothing recorded that a term had been
+   removed, so the next chapter's pass 1 re-added it. Now `suppressed`.
+
+### 2.4 Measured — one chapter, three runs
+
+`qwen3.5:9b`, 2026-09-28, 斗破苍穹 chapter 1 fixture, via
+`bin/translate.mjs --glossary`, which drives the same store and merge rule
+the extension uses.
+
+**Run 1 — fresh glossary, after the key fix.** 54/54 paragraphs, 0 failures.
+Pass 1 stored 13 entries, **all keyed in Chinese**, none dropped by
+`keepSourceKeys()`: `萧炎`, `萧媚`, `萧薰儿`, `乌坦城` (names), `萧家` (factions),
+`斗之力`, `斗之气`, `斗者` (realms), `测验魔石碑`, `斗之气旋`, `低级`, `高级`,
+`种子级别` (terms). Compare §1.4, where the same chapter produced zero
+Chinese keys.
+
+Rendering drift between runs is real: this run chose "Dou Qi" / "Dou Zhe"
+where §1.4's chose "Dou Energy" / "Dou Expert" for the same two terms. Both
+are defensible; neither is wrong. It is exactly why the first stored
+rendering has to win — without storage, every chapter re-rolls this.
+
+**Hand edit, through `replaceAll()`** as the popup saves it: `斗之气` →
+"Battle Qi", `斗者` → "Fighter" — chosen because the model would never pick
+them on its own, so every occurrence is attributable — and `低级` deleted.
+
+**Run 2 — same chapter, seeded from the edited glossary.** 54/54, 0 failures.
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| "Dou Zhe" | 5 | **0** |
+| "Fighter" | 0 | **5** |
+| "Dou Qi" (standalone) | 14 | **0** |
+| "Battle Qi" | 0 | **9** |
+| "Dou Qi Spiral" | — | **4** |
+| `低级` in stored glossary | yes | **no** — pass 1 proposed it again; suppressed |
+| Chapters counted | 1 | 2 |
+
+The hand edits reached the translation completely: every standalone
+occurrence of both renamed terms changed. Pass 1 re-proposing the deleted
+`低级` did not bring it back.
+
+**The one inconsistency is the glossary's, not the model's.** The four
+surviving "Dou Qi"s are all "Dou Qi Spiral" — the stored rendering of the
+*compound* term `斗之气旋`, which the rename of `斗之气` did not touch. The
+model followed the glossary exactly into an inconsistency the glossary
+itself contained. This is a real editor problem and it will recur with
+every renamed realm or name that has compounds built on it, which in this
+genre is most of them. Fixed as a warning, not an automatic rewrite:
+`staleCompounds()` in `glossary-text.js` lists, after a save, every entry
+whose key contains a renamed term and whose English still contains its old
+rendering. It does not rewrite them — "Battle Qi Spiral" is the likely
+intent here, but not a safe guess in general.
+
+**What this does and doesn't show.** It shows the whole mechanism working
+end to end against a real model. It does not show cross-chapter
+consistency, because pass 1 in run 2 saw the same text as run 1 — see
+§2.5.
+
+### 2.5 Measured — across two real chapters
+
+九君齐天 chapters 1 and 2, exported with the popup's **Export chapter as
+test fixture** during a normal reading session (capturing from a scripted
+browser was tried first and stopped: Qidian answers a plain fetch with a
+bot-check page and intercepts scripted requests in-page — not something this
+project should work around). `qwen3.5:9b`, 2026-09-28, one fresh glossary
+file shared by both runs.
+
+| | Chapter 1 | Chapter 2 |
+|---|---|---|
+| Paragraphs translated | 152/152 | 147/147 |
+| Failures | 0 | 0 |
+| Glossary entries after the run | 18 | 24 (6 added by ch. 2) |
+
+Of chapter 1's 18 stored entries, **6 recur in chapter 2's source text, and
+all 6 kept chapter 1's rendering in chapter 2's English**:
+
+| Term | In ch. 2 source | Stored rendering | Uses in ch. 2 English |
+|---|---|---|---|
+| 许曜 | 23 | Xu Yao | 24 |
+| 刘振 | 25 | Liu Zhen | 25 |
+| 大胖 | 8 | Dapang | 8 |
+| 九斤 | 1 | Jiujin | 1 |
+| 书吏 | 1 | Clerk | 1 |
+| 游魂 | 1 | Wandering Souls | 1, as lowercase "wandering soul" — same term used as a common noun |
+
+That is the brief's goal met on the first real attempt: the names and
+recurring terms of one chapter stayed fixed in the next, where the next
+chapter's pass 1 had never seen the first chapter's text. (许曜's 24 against
+23 is one extra English mention, most likely a resolved pronoun — a gain, not
+drift.)
+
+**What this run did *not* exercise:** chapter 2's own pass 1 **never
+disagreed** with storage. Seeded with chapter 1's glossary, it re-listed none
+of the four stored names and agreed on both stored terms it did repeat. So
+"storage beats a conflicting fresh proposal" has only been observed through
+the deliberate hand edit in §2.4, never occurring on its own between
+chapters. Two chapters is a short distance; drift is more likely to show up
+twenty chapters later, when a name reappears after a long absence. Worth
+re-checking once the Milestone 4 cache makes long runs of chapters cheap to
+look back over.
+
+**Milestone 2 is closed on this result.**
+
+### 2.6 One decision, and what's left
+- **Seeding "from several chapters" is as-you-read, not a bulk pass.** The
+  brief says pass 1 "reads a chapter (or several)." Reading several at once
+  would mean fetching chapters the reader has not opened, which is exactly
+  what the Design principle rules out. The glossary instead accumulates one
+  chapter at a time as they are read — `chapters` in the stored record counts
+  them — which reaches the same place by the second or third chapter
+  without the extension ever fetching ahead.
+- **Categories are fuzzy to the model.** The same run filed `乌坦城`, a city,
+  under `names` rather than `factions`. Harmless for translation, since every
+  category is sent to the model the same way; it matters only for how the
+  editor reads. Not worth prompt changes until it causes an actual
+  mistranslation.
 
 ---
 
@@ -481,14 +648,14 @@ rate, speaker markers) before any code changed.
    {backends,chunk,prompt,pipeline}.js`. Proven once against a real captured
    chapter via `bin/translate.mjs` — §1.4.
 3. ✅ **Glossary storage and merge rule.** `src/core/glossary.js`, tested
-   independently of the extension (§2.1).
-4. 🟡 **Extension shell — written, not yet run.** `manifest.json`, `src/
-   {background,content,popup}.js`, `src/reader.html`/`.js`. Wired to the same
-   `pipeline.run()` contract the CLI already exercises, but never loaded into
-   a real browser. **Next concrete step**, ahead of anything else in this
-   list: `chrome://extensions` → load unpacked → open a real Qidian chapter
-   → click Translate → see whether §1.5's predicted failure point is real.
-5. ⬜ **Run state that survives the popup closing.** Found in first real use
+   independently of the extension (§2.1), rewritten once (§2.3).
+4. ✅ **Extension shell.** Failed on first load, fixed, then translated a live
+   chapter end to end (§1.5).
+5. ✅ **Glossary editor and fixture export** in the popup (§2.2), plus the
+   stale-compound warning found by measurement (§2.4).
+6. ✅ **Two-chapter glossary run.** 九君齐天 ch. 1 → ch. 2: all 6 recurring
+   terms held their chapter-1 rendering (§2.5). Milestone 2 closed.
+7. ⬜ **Run state that survives the popup closing.** Found in first real use
    (2026-09-28): the popup "resets" every time it loses focus. Chrome destroys
    the popup page on close, and its "Translating…" status lived only there.
    The run itself lives in the service worker and finished fine; only the UI
@@ -500,13 +667,12 @@ rate, speaker markers) before any code changed.
    second run, a Stop button, and an on-page progress box — so this is a port,
    not new design. Belongs with Milestone 3 at the latest, since in-place
    replacement makes progress visible on the page anyway.
-6. ⬜ Glossary editor UI in the popup (§2.2).
-6. ⬜ In-place replacement, with the Vue re-render risk (§3.2) checked
+8. ⬜ In-place replacement, with the Vue re-render risk (§3.2) checked
    early and cheaply before the rest of the milestone is built on top of it.
-7. ⬜ Chapter navigation detection and local caching (§4).
-8. ⬜ Fallback routing logic connecting Milestone 3's failure cases to the
+9. ⬜ Chapter navigation detection and local caching (§4).
+10. ⬜ Fallback routing logic connecting Milestone 3's failure cases to the
    already-built `reader.html` (§5), plus a second site adapter.
-9. Not planned yet: JP/KR (§6), prefetch-ahead-of-reading (open question
+11. Not planned yet: JP/KR (§6), prefetch-ahead-of-reading (open question
    below), a shared/hosted glossary or cache (ruled out by the Design
    principle, not merely undone).
 

@@ -12,6 +12,7 @@
 import { chunk } from "./chunk.js";
 import { analysisPrompt, translationPrompt } from "./prompt.js";
 import { parseJson } from "./backends.js";
+import { CATEGORIES, mergeGlossaries } from "./glossary.js";
 
 /**
  * How much source text to show pass 1. A single chapter is usually small
@@ -40,7 +41,30 @@ function analysisText(units, budget = MAX_ANALYSIS_CHARS) {
   return { text: kept.join("\n"), sampled: true, keptUnits: kept.length };
 }
 
-const GLOSSARY_KEYS = ["names", "factions", "realms", "techniques", "terms"];
+const GLOSSARY_KEYS = CATEGORIES;
+
+const HAN = /\p{Script=Han}/u;
+
+/**
+ * Drop entries whose key is not written in Chinese. A glossary key is how a
+ * term is recognised in the source, so a pinyin or English key ("Xiao Yan")
+ * can never match anything — and it would never collide with a hand-edited
+ * 萧炎 either, so the "existing entries win" rule would silently not apply.
+ * The first real run produced nothing but keys like these (design doc §2.3).
+ */
+export function keepSourceKeys(glossary, log = () => {}) {
+  if (!glossary || typeof glossary !== "object") return glossary;
+  const out = { ...glossary };
+  let dropped = 0;
+  for (const cat of GLOSSARY_KEYS) {
+    const entries = Object.entries(glossary[cat] || {});
+    const kept = entries.filter(([term]) => HAN.test(term));
+    dropped += entries.length - kept.length;
+    out[cat] = Object.fromEntries(kept);
+  }
+  if (dropped) log(`pass 1: dropped ${dropped} entr${dropped === 1 ? "y" : "ies"} not keyed in Chinese`);
+  return out;
+}
 
 /** Pass 1: glossary and style note, seeded from the novel's running glossary. */
 export async function analyse(units, backend, meta = {}, log = () => {}, seed = null) {
@@ -216,12 +240,24 @@ export async function run(chapter, backend, options = {}, log = () => {}, onProg
   const units = (chapter.paragraphs || []).map((p) => ({ zh: p.zh }));
   if (!units.length) throw new Error("Chapter contains no paragraphs.");
 
-  const glossary = await analyse(units, backend, chapter, log, options.seed);
+  const seed = options.seed || null;
+  const found = keepSourceKeys(await analyse(units, backend, chapter, log, seed), log);
+
+  // Translate with the stored glossary merged in, stored entries winning.
+  // Seeding pass 1 alone is not enough: the model may re-render a seeded
+  // term, or drop it under the entry caps, and a hand edit that only reaches
+  // storage but not the translation has not actually won anything.
+  const used = seed
+    ? { ...found, ...mergeGlossaries(seed, found, seed.suppressed) }
+    : found;
+
   const { translations, failures, stopped } = await translateUnits(
-    units, glossary, backend, options, log, (partial, done, total) =>
+    units, used, backend, options, log, (partial, done, total) =>
       onProgress({ units, translations: partial, done, total })
   );
 
   const translated = translations.filter(Boolean).length;
-  return { units, glossary, translations, failures, translated, stopped };
+  // `glossary` is this chapter's own findings, to be remembered; `used` is
+  // what the chapter was actually translated with.
+  return { units, glossary: found, used, translations, failures, translated, stopped };
 }

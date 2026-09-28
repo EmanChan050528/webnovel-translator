@@ -13,6 +13,10 @@ const LANGUAGES = {
     forwardContext:
       "in Chinese narration, what comes next often reveals who or what the current line is about — Chinese drops subjects even more freely than it marks them.",
     termExample: `For example 金丹 is "Golden Core" (a cultivation stage), not "golden pill", when the setting is xianxia.`,
+    // Shown as the key in the JSON template. Real characters rather than a
+    // description like "chinese name": the first real run (design doc §2.3)
+    // was given descriptions and returned pinyin and English keys throughout.
+    keyExample: { name: "张三", faction: "青云门", realm: "筑基", technique: "御剑术", term: "灵石" },
     rules: [
       `Chinese narrative prose drops the subject constantly, and there is no verb agreement to recover it from. Decide who or what each line is about using the context above and the reference sheet. Do not default to a pronoun where the reference sheet gives a name — reuse the name instead, the way the source does less often than natural English would.`,
       `Chinese is topic-prominent: a sentence often opens with the thing being talked about, not the grammatical subject of the English sentence it will become. Translate for natural English sentence order and rhythm, not the source's clause order. Do not produce a literal transliteration of Chinese sentence structure.`,
@@ -74,15 +78,16 @@ Produce JSON with exactly these keys:
 
 {
   "setting": "One or two sentences: genre, premise, and where this chapter falls in the story so far, as best you can tell. Be specific — this disambiguates terms later.",
-  "names": { "${L.name.toLowerCase()} name": "how to render it in English, consistently" },
-  "factions": { "${L.name.toLowerCase()} term": "how to render this sect, clan, or organisation name in English" },
-  "realms": { "${L.name.toLowerCase()} term": "how to render this cultivation stage or power-ranking name in English" },
-  "techniques": { "${L.name.toLowerCase()} term": "how to render this skill, technique, or cultivation method name in English" },
-  "terms": { "${L.name.toLowerCase()} term": "English meaning IN THIS CONTEXT, not the dictionary default — items, treasures, and other recurring vocabulary that does not fit the categories above" },
+  "names": { "${L.keyExample.name}": "how to render it in English, consistently" },
+  "factions": { "${L.keyExample.faction}": "how to render this sect, clan, or organisation name in English" },
+  "realms": { "${L.keyExample.realm}": "how to render this cultivation stage or power-ranking name in English" },
+  "techniques": { "${L.keyExample.technique}": "how to render this skill, technique, or cultivation method name in English" },
+  "terms": { "${L.keyExample.term}": "English meaning IN THIS CONTEXT, not the dictionary default — items, treasures, and other recurring vocabulary that does not fit the categories above" },
   "register": "How the narration and dialogue sound, and what English register matches (e.g. wry and understated, or breathless and dramatic). One or two sentences."
 }
 
 Guidance:
+- Every key is the term **exactly as it is written in the ${L.name} text above, in ${L.name} characters** — never pinyin, never English. The key is how the term is found in later chapters; a key that does not appear in the source text is useless.
 - "terms" is for words whose ordinary dictionary sense would be wrong here. ${L.termExample}
 - A name only belongs in "factions", "realms", or "techniques" if it is a recurring proper noun in this genre's sense, not an ordinary word that happens to appear once.
 - If a category is empty, use an empty object. Do not invent entries.

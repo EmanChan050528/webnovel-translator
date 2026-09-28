@@ -6,8 +6,15 @@ import * as qidian from "./qidian.js";
 
 const ADAPTERS = [qidian];
 
-export function adapterForUrl(url = location.href) {
+export function adapterForUrl(url) {
   return ADAPTERS.find((a) => a.isChapterPage(url)) || null;
+}
+
+/** { site, novelId, chapterId } for a supported chapter URL, else null. */
+export function identifyNovel(url) {
+  const adapter = adapterForUrl(url);
+  const ids = adapter?.idsFromUrl(url);
+  return ids ? { site: adapter.site, ...ids } : null;
 }
 
 export { qidian };

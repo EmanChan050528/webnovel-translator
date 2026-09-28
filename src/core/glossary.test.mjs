@@ -1,24 +1,19 @@
-// Test for the per-novel glossary merge rule in core/glossary.js.
+// Tests for the per-novel glossary merge rule in core/glossary.js.
 // Run: node src/core/glossary.test.mjs
 
-import { makeGlossaryStore, novelKey } from "./glossary.js";
+import { makeGlossaryStore, mergeGlossaries, novelKey } from "./glossary.js";
 
 function fakeStorage() {
   const data = new Map();
   return {
     async get(keys) {
       if (keys === null || keys === undefined) return Object.fromEntries(data);
-      const list = Array.isArray(keys) ? keys : [keys];
       const out = {};
-      for (const k of list) if (data.has(k)) out[k] = data.get(k);
+      for (const k of Array.isArray(keys) ? keys : [keys]) if (data.has(k)) out[k] = data.get(k);
       return out;
     },
-    async set(obj) {
-      for (const [k, v] of Object.entries(obj)) data.set(k, v);
-    },
-    async remove(keys) {
-      for (const k of Array.isArray(keys) ? keys : [keys]) data.delete(k);
-    },
+    async set(obj) { for (const [k, v] of Object.entries(obj)) data.set(k, v); },
+    async remove(keys) { for (const k of Array.isArray(keys) ? keys : [keys]) data.delete(k); },
   };
 }
 
@@ -33,45 +28,77 @@ function check(name, got, want) {
   }
 }
 
+const S = "qidian", N = "1209977";
+
 async function run() {
-  // 1. Existing entries win over a later chapter's fresh findings.
   {
     const store = makeGlossaryStore(fakeStorage());
-    await store.remember("qidian", "1209977", { names: { 萧炎: "Xiao Yan" } }, { novelTitle: "斗破苍穹" });
-    // Chapter 2's analysis pass proposes a different spelling for the same name.
-    await store.remember("qidian", "1209977", { names: { 萧炎: "Xiao Yen" } });
-    const g = await store.get("qidian", "1209977");
-    check("existing chapter-1 spelling survives chapter 2's disagreement", g.names["萧炎"], "Xiao Yan");
+    await store.remember(S, N, { names: { 萧炎: "Xiao Yan" } }, { novelTitle: "斗破苍穹" });
+    await store.remember(S, N, { names: { 萧炎: "Xiao Yen" } });
+    const g = await store.get(S, N);
+    check("a stored rendering survives a later chapter's disagreement", g.names["萧炎"], "Xiao Yan");
     check("chapter count accumulates", g.chapters, 2);
+    check("title is kept from the first chapter that supplied it", g.title, "斗破苍穹");
   }
 
-  // 2. A hand edit always wins, even over what remember() already has.
   {
     const store = makeGlossaryStore(fakeStorage());
-    await store.remember("qidian", "1209977", { names: { 萧炎: "Xiao Yan" } });
-    await store.applyEdit("qidian", "1209977", "names", "萧炎", "Xiao Yan (protagonist)");
-    await store.remember("qidian", "1209977", { names: { 萧炎: "Xiao Yen" } });
-    const g = await store.get("qidian", "1209977");
-    check("hand edit survives a later chapter's fresh finding", g.names["萧炎"], "Xiao Yan (protagonist)");
-    check("editedByHand flag is set", g.editedByHand, true);
+    await store.remember(S, N, { names: { 萧炎: "Xiao Yan" } });
+    await store.replaceAll(S, N, { names: { 萧炎: "Xiao Yan (MC)" } });
+    await store.remember(S, N, { names: { 萧炎: "Xiao Yen" } });
+    const g = await store.get(S, N);
+    check("a hand edit survives a later chapter", g.names["萧炎"], "Xiao Yan (MC)");
+    check("editedByHand is set", g.editedByHand, true);
   }
 
-  // 3. Two novels on the same site never collide.
+  // The bug the first version had: a full category of fresh proposals
+  // pushed stored entries out through the cap.
+  {
+    const base = { names: {} };
+    for (let i = 0; i < 40; i++) base.names[`人${i}`] = `Person ${i}`;
+    const add = { names: { 新人: "Newcomer" } };
+    const merged = mergeGlossaries(base, add);
+    check("the cap keeps every stored entry", Object.keys(merged.names).length, 40);
+    check("the cap drops the new proposal, not a stored one", "新人" in merged.names, false);
+  }
+
   {
     const store = makeGlossaryStore(fakeStorage());
-    await store.remember("qidian", "1209977", { names: { 萧炎: "Xiao Yan" } });
-    await store.remember("qidian", "999999", { names: { 萧炎: "A different Xiao Yan" } });
-    const a = await store.get("qidian", "1209977");
-    const b = await store.get("qidian", "999999");
-    check("novel A keeps its own glossary", a.names["萧炎"], "Xiao Yan");
-    check("novel B keeps its own glossary", b.names["萧炎"], "A different Xiao Yan");
+    await store.remember(S, N, { names: { 萧炎: "Xiao Yan", 天: "Tian" } });
+    await store.replaceAll(S, N, { names: { 萧炎: "Xiao Yan" } });
+    await store.remember(S, N, { names: { 天: "Tian" } });
+    const g = await store.get(S, N);
+    check("a term deleted by hand is not re-added by a later chapter", "天" in g.names, false);
+    check("the deletion is recorded as suppressed", g.suppressed.names, ["天"]);
+
+    await store.replaceAll(S, N, { names: { 萧炎: "Xiao Yan", 天: "Heaven" } });
+    const g2 = await store.get(S, N);
+    check("typing a deleted term back in un-suppresses it", g2.suppressed.names, []);
+    check("and keeps the new value", g2.names["天"], "Heaven");
   }
 
-  // 4. novelKey requires both parts — a silent site-wide key would merge
-  //    unrelated novels' glossaries.
+  {
+    const merged = mergeGlossaries(
+      { names: { 萧炎: "Xiao Yan" } },
+      { names: { 萧炎: "Xiao Yen", 萧媚: "Xiao Mei", 天: "Tian" } },
+      { names: ["天"] }
+    );
+    check("mergeGlossaries: base wins, new terms fill in, suppressed stay out",
+      merged.names, { 萧炎: "Xiao Yan", 萧媚: "Xiao Mei" });
+  }
+
+  {
+    const store = makeGlossaryStore(fakeStorage());
+    await store.remember(S, N, { names: { 萧炎: "Xiao Yan" } });
+    await store.remember(S, "999999", { names: { 萧炎: "Someone else" } });
+    check("two novels on one site never share a glossary",
+      [(await store.get(S, N)).names["萧炎"], (await store.get(S, "999999")).names["萧炎"]],
+      ["Xiao Yan", "Someone else"]);
+  }
+
   {
     let threw = false;
-    try { novelKey("qidian", null); } catch { threw = true; }
+    try { novelKey(S, null); } catch { threw = true; }
     check("novelKey refuses a missing novelId", threw, true);
   }
 

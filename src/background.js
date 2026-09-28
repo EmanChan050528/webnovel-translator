@@ -7,6 +7,7 @@
 import { ollamaBackend } from "./core/backends.js";
 import { run as runPipeline } from "./core/pipeline.js";
 import { makeGlossaryStore } from "./core/glossary.js";
+import { identifyNovel } from "./site-adapters/index.js";
 
 const glossaryStore = makeGlossaryStore({
   get: (keys) => chrome.storage.local.get(keys),
@@ -31,7 +32,7 @@ async function ensureContentScript(tabId) {
 }
 
 async function extractFromTab(tab) {
-  if (!/^https:\/\/www\.qidian\.com\/chapter\/\d+\/\d+/.test(tab.url || "")) {
+  if (!identifyNovel(tab.url)) {
     throw new Error("This tab isn't a supported chapter page. Open a qidian.com/chapter/... page first.");
   }
   await ensureContentScript(tab.id);
@@ -79,39 +80,48 @@ async function translateChapter(tab, { model } = {}, log = () => {}) {
   return resultId;
 }
 
+async function activeTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) throw new Error("No active tab.");
+  return tab;
+}
+
+const HANDLERS = {
+  async "translate-active-tab"(msg) {
+    const tab = await activeTab();
+    const log = [];
+    const resultId = await translateChapter(tab, msg.options || {}, (line) => log.push(line));
+    const readerUrl = chrome.runtime.getURL(`src/reader.html?result=${encodeURIComponent(resultId)}`);
+    await chrome.tabs.create({ url: readerUrl });
+    return { resultId, log };
+  },
+
+  /** Everything the popup needs on open: which novel, and its glossary. */
+  async "popup:init"() {
+    const tab = await activeTab();
+    const novel = identifyNovel(tab.url);
+    if (!novel) return { novel: null };
+    const glossary = await glossaryStore.get(novel.site, novel.novelId);
+    return { novel, glossary };
+  },
+
+  async "glossary:save"(msg) {
+    const glossary = await glossaryStore.replaceAll(msg.site, msg.novelId, msg.categories);
+    return { glossary };
+  },
+
+  /** The extracted chapter, for the popup to save as a local test fixture. */
+  async "export-active-tab"() {
+    const chapter = await extractFromTab(await activeTab());
+    return { chapter };
+  },
+};
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type === "translate-active-tab") {
-    (async () => {
-      try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab) throw new Error("No active tab.");
-        const log = [];
-        const resultId = await translateChapter(tab, msg.options || {}, (line) => log.push(line));
-        const readerUrl = chrome.runtime.getURL(`src/reader.html?result=${encodeURIComponent(resultId)}`);
-        await chrome.tabs.create({ url: readerUrl });
-        sendResponse({ ok: true, resultId, log });
-      } catch (err) {
-        sendResponse({ ok: false, error: err.message });
-      }
-    })();
-    return true;
-  }
-
-  if (msg?.type === "glossary:get") {
-    (async () => {
-      const g = await glossaryStore.get(msg.site, msg.novelId);
-      sendResponse({ ok: true, glossary: g });
-    })();
-    return true;
-  }
-
-  if (msg?.type === "glossary:edit") {
-    (async () => {
-      const g = await glossaryStore.applyEdit(msg.site, msg.novelId, msg.category, msg.term, msg.value);
-      sendResponse({ ok: true, glossary: g });
-    })();
-    return true;
-  }
-
-  return false;
+  const handler = HANDLERS[msg?.type];
+  if (!handler) return false;
+  handler(msg)
+    .then((data) => sendResponse({ ok: true, ...data }))
+    .catch((err) => sendResponse({ ok: false, error: err.message }));
+  return true;
 });

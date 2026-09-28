@@ -13,8 +13,10 @@ export function isChapterPage(url = location.href) {
   return CHAPTER_URL_RE.test(url);
 }
 
-function parseIds(url = location.href) {
-  const m = url.match(CHAPTER_URL_RE);
+/** Novel and chapter IDs from a URL alone — usable from the service worker,
+ *  which has the tab's URL but no DOM. */
+export function idsFromUrl(url) {
+  const m = (url || "").match(CHAPTER_URL_RE);
   return m ? { novelId: m[1], chapterId: m[2] } : null;
 }
 
@@ -67,13 +69,19 @@ function looksLocked(doc, paragraphs) {
  *   serialise DOM nodes.
  */
 export function extractChapter(doc = document) {
-  const ids = parseIds(doc.location ? doc.location.href : location.href);
+  const ids = idsFromUrl(doc.location ? doc.location.href : location.href);
   if (!ids) return null;
 
   const main = doc.querySelector("main.content");
   if (!main) return null;
 
-  const novelTitle = directText(doc.querySelector("h1.text-rh3")) || null;
+  // h1.text-rh3 is a book header that only renders on a novel's first
+  // chapter (found when chapter 2 of 九君齐天 exported with no title). The
+  // tab title carries 《novel title》 on every chapter.
+  const novelTitle =
+    directText(doc.querySelector("h1.text-rh3")) ||
+    (doc.title.match(/《(.+?)》/) || [])[1] ||
+    null;
   const chapterTitle = directText(doc.querySelector("h1.title")) || null;
 
   const paragraphs = Array.from(main.querySelectorAll(":scope > p"))

@@ -4,22 +4,45 @@
   <meta charset="utf-8" />
   <title>Webnovel Translator</title>
   <style>
-    body { font: 13px system-ui, sans-serif; width: 280px; padding: 12px; color: #1a1a1a; }
-    h1 { font-size: 14px; margin: 0 0 8px; }
-    button { width: 100%; padding: 8px; font-size: 13px; cursor: pointer; }
+    body { font: 13px system-ui, sans-serif; width: 340px; padding: 12px; margin: 0; color: #1a1a1a; }
+    h1 { font-size: 14px; margin: 0 0 2px; }
+    h2 { font-size: 13px; margin: 16px 0 4px; }
+    .novel { font-size: 12px; color: #666; margin-bottom: 10px; }
+    button { width: 100%; padding: 7px; font-size: 13px; cursor: pointer; }
     button:disabled { cursor: default; opacity: 0.6; }
-    #status { margin-top: 10px; font-size: 12px; color: #555; white-space: pre-wrap; }
-    #status.error { color: #b00020; }
-    label { display: block; margin-top: 10px; font-size: 12px; }
-    select, input { width: 100%; margin-top: 4px; padding: 4px; }
+    button.secondary { margin-top: 6px; }
+    label { display: block; margin-bottom: 4px; font-size: 12px; }
+    input { width: 100%; box-sizing: border-box; padding: 4px; margin-bottom: 8px; }
+    textarea {
+      width: 100%; box-sizing: border-box; height: 220px; resize: vertical;
+      font: 12px/1.5 ui-monospace, Consolas, "Microsoft YaHei", monospace; padding: 6px;
+    }
+    .note { margin-top: 6px; font-size: 12px; color: #555; white-space: pre-wrap; }
+    .note.error { color: #b00020; }
+    .hint { font-size: 11px; color: #777; margin: 2px 0 6px; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <h1>Webnovel Translator</h1>
-  <label for="model">Model (Ollama)</label>
-  <input id="model" value="qwen3.5:9b" />
-  <button id="translate">Translate this chapter</button>
-  <div id="status"></div>
+  <div class="novel" id="novel">Checking this tab…</div>
+
+  <section id="chapterTools" hidden>
+    <label for="model">Model (Ollama)</label>
+    <input id="model" value="qwen3.5:9b" />
+    <button id="translate">Translate this chapter</button>
+    <div class="note" id="status"></div>
+
+    <h2>Glossary for this novel</h2>
+    <div class="hint">One <code>term = English</code> per line, under a [section]. Existing entries always win over new chapters; a term you delete stays deleted.</div>
+    <textarea id="glossary" spellcheck="false"></textarea>
+    <button id="saveGlossary" class="secondary">Save glossary</button>
+    <div class="note" id="glossaryNote"></div>
+
+    <h2>Testing</h2>
+    <button id="export" class="secondary">Export chapter as test fixture</button>
+    <div class="note" id="exportNote"></div>
+  </section>
 </body>
 <script src="popup.js" type="module"></script>
 </html>

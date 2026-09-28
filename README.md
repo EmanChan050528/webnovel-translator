@@ -33,7 +33,17 @@ Translates a real captured chapter (chapter 1 of 斗破苍穹) and prints the
 English to stdout, with progress/glossary logging on stderr. Add
 `--model qwen3.5:4b` to try a different installed model, or
 `--out result.json` to keep the full structured result (units, glossary,
-translations, failures) for inspection.
+translations, failures) for inspection. Add `--glossary glossary.json` to
+carry a per-novel glossary across runs, with the same merge rule the
+extension uses:
+
+```
+node bin/translate.mjs ch1.json --glossary eval/fixtures/glossary.json
+node bin/translate.mjs ch2.json --glossary eval/fixtures/glossary.json
+```
+
+To capture a fixture, open the chapter, then use **Export chapter as test
+fixture** in the popup and move the downloaded file into `eval/fixtures/`.
 
 `eval/fixtures/` is gitignored: captured chapter text is copyrighted and
 stays on the machine that captured it. A fresh clone has no fixtures —
@@ -51,17 +61,21 @@ capture one from a chapter you can read, in the same shape:
 `chrome://extensions` → enable Developer mode → **Load unpacked** → select
 this folder. Open a Qidian chapter (`qidian.com/chapter/{bookId}/{chapterId}/`),
 click the extension icon, **Translate this chapter**. Opens the result in a
-new tab. This path has not been exercised end-to-end yet — see
-translator-design.md §1.5 if it doesn't work on the first try.
+new tab.
+
+The popup also shows the novel's glossary, one `term = English` per line
+under a `[names]` / `[factions]` / `[realms]` / `[techniques]` / `[terms]`
+heading. Glossary entries you already have always win over what a new
+chapter proposes, and a term you delete stays deleted.
 
 ## Tests
 
 ```
 npm test
 ```
-Currently covers `core/glossary.js`'s merge rule (per-novel keying, existing
-entries win, hand edits outrank everything). Run individually with
-`node src/core/glossary.test.mjs`.
+Covers the glossary merge rule (`src/core/glossary.test.mjs`) and the
+editor's text format (`src/glossary-text.test.mjs`). Each also runs on its
+own with `node <file>`.
 
 ## Layout
 
@@ -70,7 +84,8 @@ manifest.json              MV3 manifest
 src/
   background.js            service worker: orchestrates a translation, glossary storage
   content.js                content script: runs the site adapter on request
-  popup.html / popup.js     trigger + (eventually) glossary editor
+  popup.html / popup.js     translate, glossary editor, fixture export
+  glossary-text.js          the editor's `term = English` text format
   reader.html / reader.js   Milestone 1 output tab; becomes the Milestone 5 fallback view
   site-adapters/
     qidian.js               chapter detection + extraction for qidian.com

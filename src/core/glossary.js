@@ -1,119 +1,122 @@
-// Per-novel glossary storage.
+// Per-novel glossary storage and merge rule.
 //
-// JP Subs kept this logic inline in background.js, keyed by YouTube channel
-// ID. It gets its own module here for two reasons: the merge rule is subtle
-// enough to deserve tests independent of chrome.storage and message-passing
-// (Milestone 2), and "per-novel" needs a composite key that a channel ID
-// never did.
+// JP Subs kept this inline in background.js, keyed by channel ID. It gets its
+// own module here: the merge rule is subtle enough to test without chrome.*,
+// and "per-novel" needs a composite key a channel ID never did.
 //
-// The merge rule is unchanged from JP Subs: existing entries always win.
-// Chapter 1's analysis pass proposes a glossary; a hand correction made later
-// must never be overwritten by chapter 12's analysis pass finding the same
-// name spelled differently.
+// The rule, from the brief: existing entries always win. That covers three
+// cases, each of which has a test in glossary.test.mjs:
+//   1. A later chapter's pass 1 proposing a different rendering for a term
+//      already stored does not change it.
+//   2. The per-category size cap evicts new proposals, never stored entries.
+//   3. A term deleted by hand stays deleted — a later chapter's pass 1
+//      proposing it again does not bring it back.
 
 const KEY_PREFIX = "novel:";
-const CATEGORIES = ["names", "factions", "realms", "techniques", "terms"];
-const MAX_ENTRIES_PER_CATEGORY = 40; // keeps the prompt small, same cap JP Subs used
+export const CATEGORIES = ["names", "factions", "realms", "techniques", "terms"];
+const MAX_ENTRIES_PER_CATEGORY = 40;
 const MAX_NOVELS = 200;
 
-/** A novel is identified by site + the site's own novel ID, not by title —
- *  titles collide across sites and sometimes across novels on one site. */
+/** A novel is site + the site's own novel ID, not its title — titles collide. */
 export function novelKey(site, novelId) {
   if (!site || !novelId) throw new Error("novelKey requires both site and novelId.");
   return `${KEY_PREFIX}${site}:${novelId}`;
 }
 
-const empty = () => Object.fromEntries(CATEGORIES.map((k) => [k, {}]));
+const emptyCategories = () => Object.fromEntries(CATEGORIES.map((k) => [k, {}]));
 
 /**
- * @param storage - a chrome.storage.local-shaped object: { get(keys), set(obj), remove(keys) }.
- *   Passed in rather than imported so this module has no chrome.* dependency
- *   and can be unit-tested with a plain in-memory stub.
+ * Merge `add` into `base`, category by category. `base` wins every key
+ * collision and is always kept whole; `add` only fills the space left under
+ * the cap, and never re-adds a key listed in `suppressed[category]`.
+ *
+ * Pure, so the pipeline uses the same rule to build the glossary a chapter is
+ * translated with — storing a hand edit is worthless if the translation
+ * itself then uses pass 1's fresh guess instead.
+ */
+export function mergeGlossaries(base = {}, add = {}, suppressed = {}) {
+  const out = {};
+  for (const cat of CATEGORIES) {
+    const kept = { ...(base[cat] || {}) };
+    const blocked = new Set(suppressed[cat] || []);
+    for (const [term, value] of Object.entries(add[cat] || {})) {
+      if (Object.keys(kept).length >= MAX_ENTRIES_PER_CATEGORY) break;
+      if (term in kept || blocked.has(term)) continue;
+      kept[term] = value;
+    }
+    out[cat] = kept;
+  }
+  return out;
+}
+
+/**
+ * @param storage - chrome.storage.local-shaped { get(keys), set(obj), remove(keys) }.
+ *   Injected so this module runs under Node (tests, the CLI's --glossary file).
  */
 export function makeGlossaryStore(storage) {
   async function get(site, novelId) {
     const key = novelKey(site, novelId);
     const stored = (await storage.get(key))[key];
-    return stored || { ...empty(), title: null, chapters: 0, editedByHand: false, at: 0 };
+    return {
+      ...emptyCategories(),
+      title: null,
+      chapters: 0,
+      editedByHand: false,
+      suppressed: {},
+      at: 0,
+      ...(stored || {}),
+    };
   }
 
-  /** Merge one chapter's pass-1 findings into the novel's running glossary.
-   *  `base` (what's already stored, including any hand edits) wins over
-   *  `add` (this chapter's fresh findings) on every key collision. */
-  function merge(base, add) {
-    const out = { ...(add || {}), ...(base || {}) };
-    return Object.fromEntries(Object.entries(out).slice(0, MAX_ENTRIES_PER_CATEGORY));
-  }
-
+  /** Fold one chapter's pass-1 findings into the novel's running glossary. */
   async function remember(site, novelId, glossary, meta = {}) {
-    if (!site || !novelId || !glossary) return;
-    const key = novelKey(site, novelId);
+    if (!site || !novelId || !glossary) return null;
     const prev = await get(site, novelId);
-
     const next = {
+      ...prev,
+      ...mergeGlossaries(prev, glossary, prev.suppressed),
       title: meta.novelTitle || prev.title || null,
-      ...Object.fromEntries(CATEGORIES.map((k) => [k, merge(prev[k], glossary[k])])),
-      chapters: (prev.chapters || 0) + 1,
-      editedByHand: prev.editedByHand || false,
+      chapters: prev.chapters + 1,
       at: Date.now(),
     };
-    await storage.set({ [key]: next });
+    await storage.set({ [novelKey(site, novelId)]: next });
     await prune();
     return next;
   }
 
   /**
-   * Apply a hand edit made in the glossary editor. Unlike `remember`, the
-   * edited value always wins outright — a person correcting an entry is not
-   * "one more chapter's opinion" to be merged, it is the ground truth.
+   * Replace the whole glossary with what the editor saved. Unlike remember(),
+   * this is not one more opinion to merge: it is the ground truth. Terms that
+   * were present and are now gone are recorded as suppressed so pass 1 cannot
+   * re-add them; a term typed back in by hand is un-suppressed.
    */
-  async function applyEdit(site, novelId, category, term, englishValue) {
-    if (!CATEGORIES.includes(category)) {
-      throw new Error(`Unknown glossary category "${category}".`);
+  async function replaceAll(site, novelId, categories) {
+    const prev = await get(site, novelId);
+    const suppressed = {};
+    const next = { ...prev, editedByHand: true, at: Date.now() };
+    for (const cat of CATEGORIES) {
+      const now = { ...(categories[cat] || {}) };
+      const removed = Object.keys(prev[cat] || {}).filter((t) => !(t in now));
+      suppressed[cat] = [...new Set([...(prev.suppressed[cat] || []), ...removed])]
+        .filter((t) => !(t in now));
+      next[cat] = now;
     }
-    const key = novelKey(site, novelId);
-    const prev = await get(site, novelId);
-    const next = {
-      ...prev,
-      [category]: { ...prev[category], [term]: englishValue },
-      editedByHand: true,
-      at: Date.now(),
-    };
-    await storage.set({ [key]: next });
+    next.suppressed = suppressed;
+    await storage.set({ [novelKey(site, novelId)]: next });
     return next;
   }
 
-  async function remove(site, novelId, category, term) {
-    const key = novelKey(site, novelId);
-    const prev = await get(site, novelId);
-    const rest = { ...prev[category] };
-    delete rest[term];
-    const next = { ...prev, [category]: rest, editedByHand: true, at: Date.now() };
-    await storage.set({ [key]: next });
-    return next;
-  }
-
-  /** Bound the number of novels remembered, same LRU-with-hand-edit-immunity
-   *  rule JP Subs used for channels: a glossary someone corrected by hand
-   *  cost real effort and is never evicted for being old. */
+  /** LRU over novels; hand-edited glossaries are never evicted for being old. */
   async function prune() {
     const all = await storage.get(null);
     const keys = Object.keys(all).filter((k) => k.startsWith(KEY_PREFIX));
     if (keys.length <= MAX_NOVELS) return;
-    const droppable = keys
+    const drop = keys
       .filter((k) => !all[k]?.editedByHand)
-      .sort((a, b) => (all[a]?.at || 0) - (all[b]?.at || 0));
-    const drop = droppable.slice(0, keys.length - MAX_NOVELS);
+      .sort((a, b) => (all[a]?.at || 0) - (all[b]?.at || 0))
+      .slice(0, keys.length - MAX_NOVELS);
     if (drop.length) await storage.remove(drop);
   }
 
-  /** For the glossary editor / stretch reference: every novel remembered. */
-  async function list() {
-    const all = await storage.get(null);
-    return Object.entries(all)
-      .filter(([k]) => k.startsWith(KEY_PREFIX))
-      .map(([k, v]) => ({ key: k, ...v }));
-  }
-
-  return { get, remember, applyEdit, remove, list };
+  return { get, remember, replaceAll };
 }
