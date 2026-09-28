@@ -16,14 +16,27 @@
   const loadAdapters = () =>
     (adaptersPromise ||= import(chrome.runtime.getURL("src/site-adapters/index.js")));
 
-  async function waitForChapterRoot(adapter, timeoutMs = 4000, intervalMs = 150) {
+  /**
+   * Wait until the chapter has finished rendering: the paragraph count must
+   * hold steady across three reads, not merely be non-zero. On arrival the
+   * page can still be mid-render, and a partial read has a different
+   * fingerprint from the cached chapter — a cache miss on a chapter that
+   * was cached (design doc §4.2).
+   */
+  async function waitForChapterRoot(adapter, timeoutMs = 6000, intervalMs = 250) {
     const deadline = Date.now() + timeoutMs;
+    let last = -1;
+    let steady = 0;
+    let chapter = null;
     while (Date.now() < deadline) {
-      const chapter = adapter.extractChapter(document);
-      if (chapter && chapter.paragraphs.length > 0) return chapter;
+      chapter = adapter.extractChapter(document);
+      const n = chapter?.paragraphs.length ?? 0;
+      steady = n > 0 && n === last ? steady + 1 : 0;
+      if (steady >= 2) return chapter;
+      last = n;
       await new Promise((r) => setTimeout(r, intervalMs));
     }
-    return adapter.extractChapter(document);
+    return chapter;
   }
 
   // ------------------------------------------------------------ replacement
@@ -232,7 +245,9 @@
         item.en = en;
         apply(item);
       });
-      showPill({ text: `Translating ${msg.done}/${msg.total}`, running: true });
+      // `quiet`: a glossary rename pushed into an already-finished page —
+      // update the text, but it is not a run and must not say "Translating".
+      if (!msg.quiet) showPill({ text: `Translating ${msg.done}/${msg.total}`, running: true });
       return {};
     },
 
@@ -243,7 +258,9 @@
           ? msg.error
           : msg.stopped
             ? `Stopped · ${msg.translated}/${msg.total} paragraphs`
-            : `Translated${missing ? ` · ${missing} paragraph(s) failed` : ""}`,
+            : msg.cached
+              ? "Translated (cached)"
+              : `Translated${missing ? ` · ${missing} paragraph(s) failed` : ""}`,
         error: !!msg.error,
       });
       return {};
@@ -267,4 +284,15 @@
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   });
+
+  // Milestone 4: tell the background a chapter has arrived, so a cached
+  // chapter is replaced at once and an opted-in novel starts translating.
+  // Only when loaded with the page: when the background injected this file
+  // itself, it did so mid-request and is about to extract and run — an
+  // arrival from here would race that into a duplicate run.
+  if (!globalThis.__webnovelTranslatorInjected) {
+    HANDLERS["extract-chapter"]({ prime: true })
+      .then(({ chapter }) => chrome.runtime.sendMessage({ type: "page:arrived", chapter }))
+      .catch(() => { /* not a readable chapter page: nothing to announce */ });
+  }
 })();

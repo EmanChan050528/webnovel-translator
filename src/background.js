@@ -1,33 +1,62 @@
-// Service worker. Milestone 3: translate the chapter in the active tab and
-// replace it in place, paragraph by paragraph, as each chunk finishes. The
-// reader tab stays available as the fallback view (Milestone 5 routes to it
-// automatically; for now it is a button).
+// Service worker. Translates the chapter in a tab and replaces it in place
+// (Milestone 3); serves finished chapters from a cache and, for novels the
+// user opts in, translates each chapter on arrival (Milestone 4).
 //
 // Run state lives here, per tab, not in the popup. Chrome destroys the popup
-// page whenever it loses focus, and the first real use showed what happens
-// when the popup owns the state: it "forgets" a running translation and will
-// happily start a second one on the same GPU (design doc Build Order).
+// page whenever it loses focus; the first real use showed a popup-owned run
+// "forgetting" itself and allowing a duplicate on the same GPU.
 
 import { ollamaBackend } from "./core/backends.js";
 import { run as runPipeline } from "./core/pipeline.js";
-import { makeGlossaryStore } from "./core/glossary.js";
+import { makeGlossaryStore, CATEGORIES } from "./core/glossary.js";
+import { makeChapterCache, sourceHash } from "./core/cache.js";
+import { renamesBetween } from "./core/glossary-apply.js";
 import { identifyNovel } from "./site-adapters/index.js";
 
-const glossaryStore = makeGlossaryStore({
+const storage = {
   get: (keys) => chrome.storage.local.get(keys),
   set: (obj) => chrome.storage.local.set(obj),
   remove: (keys) => chrome.storage.local.remove(keys),
-});
+};
+const glossaryStore = makeGlossaryStore(storage);
+const chapterCache = makeChapterCache(storage);
 
 const RESULT_PREFIX = "result:";
+const AUTO_PREFIX = "auto:";
+const DEFAULT_MODEL = "qwen3.5:9b";
+const OLLAMA_HOST = "http://localhost:11434";
+
+/** The model the user picked in the popup. Stored, not passed per click: a
+ *  chapter translated on arrival has no popup open to ask. */
+async function chosenModel() {
+  return (await chrome.storage.local.get("model")).model || DEFAULT_MODEL;
+}
 
 /**
  * tabId -> { status: "running"|"done"|"stopped"|"error", chapterId, done,
- *            total, translated, error, resultId, controller }
- * In memory only: a run cannot outlive the service worker anyway, since its
- * fetches are what keep the worker alive.
+ *            total, translated, error, resultId, cached, controller }
+ * In memory only: a run cannot outlive the service worker, since its fetches
+ * are what keep the worker alive.
  */
 const runs = new Map();
+
+/**
+ * tabId -> what happened when the chapter page last arrived. Shown in the
+ * popup: the first cache report ("reloaded, no English") could not be
+ * diagnosed because Qidian breaks DevTools, so the cache explains itself.
+ */
+const arrivals = new Map();
+
+function describeLookup(found) {
+  switch (found.reason) {
+    case "hit": return "loaded from cache";
+    case "none": return "not in cache";
+    case "old-pipeline": return "cached by an older version of the extension; discarded";
+    case "text-changed":
+      return `cached for a different version of this chapter (${found.stored} paragraphs cached, ${found.found} on the page)`;
+    default: return found.reason;
+  }
+}
 
 function publicRun(run) {
   if (!run) return null;
@@ -37,13 +66,18 @@ function publicRun(run) {
 
 /**
  * Manifest content scripts only reach pages loaded *after* the extension was
- * installed or reloaded. Ping first and inject on demand; content.js guards
- * against being loaded twice.
+ * installed or reloaded. Ping first and inject on demand. The flag set first
+ * tells content.js it was injected here, mid-request, and must not announce
+ * an arrival — that would race this request into a duplicate run.
  */
 async function ensureContentScript(tabId) {
   try {
     await chrome.tabs.sendMessage(tabId, { type: "ping" });
   } catch {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => { globalThis.__webnovelTranslatorInjected = true; },
+    });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["src/content.js"] });
   }
 }
@@ -60,19 +94,43 @@ async function extractFromTab(tab, { prime = false } = {}) {
   return res.chapter;
 }
 
-/** Best-effort message to the page. A closed or navigated tab is not an error
- *  worth failing the run over — the navigation listener stops the run. */
+/** Best-effort message to the page; a closed or navigated tab is not an error
+ *  worth failing a run over — the navigation listener stops the run. */
 function tellTab(tabId, msg) {
   return chrome.tabs.sendMessage(tabId, msg).catch(() => {});
 }
 
-async function startRun(tab, { model } = {}) {
-  const existing = runs.get(tab.id);
-  if (existing?.status === "running") {
+/** Keep a finished chapter for the reader tab (session-only). */
+async function storeResult(chapter, translations, failures) {
+  const resultId = `${chapter.site}:${chapter.novelId}:${chapter.chapterId}:${Date.now()}`;
+  await chrome.storage.session.set({
+    [RESULT_PREFIX + resultId]: {
+      chapter,
+      translations,
+      failures,
+      translated: translations.filter(Boolean).length,
+      total: chapter.paragraphs.length,
+      at: Date.now(),
+    },
+  });
+  return resultId;
+}
+
+const autoKey = (site, novelId) => `${AUTO_PREFIX}${site}:${novelId}`;
+async function isAuto(site, novelId) {
+  return !!(await chrome.storage.local.get(autoKey(site, novelId)))[autoKey(site, novelId)];
+}
+
+/**
+ * Translate `chapter` into the tab, or serve it from the cache.
+ * @param chapter - already extracted *and primed* in the content script
+ * @param force - skip the cache (the popup's Re-translate)
+ */
+async function beginRun(tabId, chapter, { force = false } = {}) {
+  const model = await chosenModel();
+  if (runs.get(tabId)?.status === "running") {
     throw new Error("Already translating this tab. Stop it first, or wait for it to finish.");
   }
-
-  const chapter = await extractFromTab(tab, { prime: true });
   if (chapter.locked) {
     throw new Error(
       "This chapter looks paywalled — the page returned only a short preview, " +
@@ -81,27 +139,50 @@ async function startRun(tab, { model } = {}) {
     );
   }
 
-  const controller = new AbortController();
+  const hash = sourceHash(chapter.paragraphs);
+  const total = chapter.paragraphs.length;
+
+  if (!force) {
+    const hit = await chapterCache.get(chapter.site, chapter.novelId, chapter.chapterId, hash);
+    if (hit) {
+      const run = {
+        status: "done",
+        cached: true,
+        chapterId: chapter.chapterId,
+        done: 1,
+        total: 1,
+        translated: hit.translations.filter(Boolean).length,
+        error: null,
+        resultId: await storeResult(chapter, hit.translations, []),
+      };
+      runs.set(tabId, run);
+      await tellTab(tabId, { type: "replace:progress", translations: hit.translations, done: 1, total: 1 });
+      await tellTab(tabId, { type: "replace:finished", translated: run.translated, total, cached: true });
+      return publicRun(run);
+    }
+  }
+
   const run = {
     status: "running",
+    cached: false,
     chapterId: chapter.chapterId,
     done: 0,
     total: 0,
     translated: 0,
     error: null,
     resultId: null,
-    controller,
+    controller: new AbortController(),
   };
-  runs.set(tab.id, run);
-
-  // Not awaited: the popup gets an immediate answer and can close. Progress
-  // reaches the page directly, and the popup reads `runs` when reopened.
-  translateInPlace(tab.id, chapter, run, model);
+  runs.set(tabId, run);
+  // Not awaited: the caller gets an immediate answer. Progress reaches the
+  // page directly, and the popup reads `runs` when reopened.
+  translateInPlace(tabId, chapter, hash, run, model);
   return publicRun(run);
 }
 
-async function translateInPlace(tabId, chapter, run, model) {
+async function translateInPlace(tabId, chapter, hash, run, model) {
   const log = (line) => console.log(`[tab ${tabId}] ${line}`);
+  const total = chapter.paragraphs.length;
   try {
     const seed = await glossaryStore.get(chapter.site, chapter.novelId);
     const backend = ollamaBackend({ model, signal: run.controller.signal });
@@ -111,17 +192,15 @@ async function translateInPlace(tabId, chapter, run, model) {
       backend,
       { seed, shouldStop: () => run.controller.signal.aborted },
       log,
-      ({ translations, done, total }) => {
+      ({ translations, done, total: chunks }) => {
         run.done = done;
-        run.total = total;
-        tellTab(tabId, { type: "replace:progress", translations, done, total });
+        run.total = chunks;
+        tellTab(tabId, { type: "replace:progress", translations, done, total: chunks });
       }
     );
 
-    // A run stopped after pass 1 still produced a real glossary, worth
-    // keeping. One stopped *during* pass 1 produced an empty fallback, and
-    // remembering it would only inflate the chapter count. A stopped run's
-    // partial translation is shown on the page but never stored as finished.
+    // A run stopped during pass 1 produced only an empty fallback glossary;
+    // remembering it would just inflate the chapter count.
     if (!result.stopped || run.done > 0) {
       await glossaryStore.remember(chapter.site, chapter.novelId, result.glossary, chapter);
     }
@@ -129,35 +208,31 @@ async function translateInPlace(tabId, chapter, run, model) {
     run.translated = result.translated;
     run.status = result.stopped ? "stopped" : "done";
     if (!result.stopped) {
-      run.resultId = `${chapter.site}:${chapter.novelId}:${chapter.chapterId}:${Date.now()}`;
-      await chrome.storage.session.set({
-        [RESULT_PREFIX + run.resultId]: {
-          chapter,
+      run.resultId = await storeResult(chapter, result.translations, result.failures);
+      // Only a complete translation is cached, the rule JP Subs settled on:
+      // a chapter with gaps that looks finished on the next visit is worse
+      // than one that plainly needs another run. Say which happened — the
+      // popup never did, and a silently skipped write looks like a broken
+      // cache.
+      const missing = total - result.translated;
+      if (missing > 0) {
+        run.cacheNote = `Not cached: ${missing} paragraph(s) failed. Re-translate to retry.`;
+      } else {
+        const saved = await chapterCache.put(chapter.site, chapter.novelId, chapter.chapterId, {
+          hash,
           translations: result.translations,
-          failures: result.failures,
-          translated: result.translated,
-          total: chapter.paragraphs.length,
-          at: Date.now(),
-        },
-      });
+          title: chapter.chapterTitle,
+          model: model || null,
+        });
+        run.cacheNote = saved ? `Saved to cache (${total} paragraphs).` : "Could not write to the cache (storage full or unavailable).";
+      }
     }
-    tellTab(tabId, {
-      type: "replace:finished",
-      translated: result.translated,
-      total: chapter.paragraphs.length,
-      stopped: !!result.stopped,
-    });
+    tellTab(tabId, { type: "replace:finished", translated: result.translated, total, stopped: !!result.stopped });
   } catch (err) {
     const stopped = run.controller.signal.aborted;
     run.status = stopped ? "stopped" : "error";
     run.error = stopped ? null : err.message;
-    tellTab(tabId, {
-      type: "replace:finished",
-      translated: run.translated,
-      total: chapter.paragraphs.length,
-      stopped,
-      error: run.error,
-    });
+    tellTab(tabId, { type: "replace:finished", translated: run.translated, total, stopped, error: run.error });
   }
 }
 
@@ -167,8 +242,7 @@ function stopRun(tabId) {
 }
 
 // Leaving the chapter ends its run: the paragraphs it would write into are
-// gone, and it should not keep occupying the GPU. Same rule JP Subs applies
-// when a tab navigates to another video.
+// gone. Same rule JP Subs applies when a tab navigates to another video.
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (!info.url) return;
   const run = runs.get(tabId);
@@ -181,6 +255,7 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   stopRun(tabId);
   runs.delete(tabId);
+  arrivals.delete(tabId);
 });
 
 async function activeTab() {
@@ -191,23 +266,57 @@ async function activeTab() {
 
 const HANDLERS = {
   async "translate-active-tab"(msg) {
-    return { run: await startRun(await activeTab(), msg.options || {}) };
+    const tab = await activeTab();
+    const chapter = await extractFromTab(tab, { prime: true });
+    return { run: await beginRun(tab.id, chapter, msg.options || {}) };
+  },
+
+  /**
+   * A chapter page finished loading (sent by content.js, already primed).
+   * Serve it from the cache if possible; otherwise translate it only if the
+   * user opted this novel in. Anything else stays untouched — opening a
+   * Qidian page must never start GPU work on its own.
+   */
+  async "page:arrived"(msg, sender) {
+    const tabId = sender.tab?.id;
+    const chapter = msg.chapter;
+    if (tabId === undefined || !chapter || chapter.locked) return { action: "none" };
+    if (runs.get(tabId)?.status === "running") return { action: "none" };
+
+    const hash = sourceHash(chapter.paragraphs);
+    const found = await chapterCache.lookup(chapter.site, chapter.novelId, chapter.chapterId, hash);
+    const auto = await isAuto(chapter.site, chapter.novelId);
+    arrivals.set(tabId, {
+      chapterId: chapter.chapterId,
+      note: `On arrival (${chapter.paragraphs.length} paragraphs read): ${describeLookup(found)}` +
+        (found.entry ? "." : auto ? "; auto-translate is on, translating." : "; auto-translate is off."),
+    });
+    if (found.entry || auto) {
+      const run = await beginRun(tabId, chapter, {});
+      return { action: run.cached ? "cached" : "translating" };
+    }
+    return { action: "none" };
   },
 
   /** From the popup, or from the page's own Stop button (sender.tab). */
   async "run:stop"(_msg, sender) {
-    const tabId = sender.tab?.id ?? (await activeTab()).id;
-    stopRun(tabId);
+    stopRun(sender.tab?.id ?? (await activeTab()).id);
     return {};
   },
 
   async "run:state"() {
     const tab = await activeTab();
-    // How many times the page re-rendered over a replaced paragraph (design
-    // doc §3.2). Surfaced in the popup because the console is not always
-    // reachable — on Qidian, opening DevTools closed the user's other tabs.
+    // How often the page re-rendered over a replaced paragraph (design doc
+    // §3.2). In the popup because DevTools is not always reachable — on
+    // Qidian, opening it closed the user's other tabs.
     const page = await chrome.tabs.sendMessage(tab.id, { type: "replace:state" }).catch(() => null);
-    return { run: publicRun(runs.get(tab.id)), reapplied: page?.ok ? page.reapplied : null };
+    const here = identifyNovel(tab.url)?.chapterId;
+    const arrival = arrivals.get(tab.id);
+    return {
+      run: publicRun(runs.get(tab.id)),
+      reapplied: page?.ok ? page.reapplied : null,
+      arrival: arrival?.chapterId === here ? arrival.note : null,
+    };
   },
 
   async "reader:open"() {
@@ -226,18 +335,75 @@ const HANDLERS = {
     return { showing: res.showing };
   },
 
-  /** Everything the popup needs on open: which novel, its glossary, the run. */
+  /** Everything the popup needs on open. */
   async "popup:init"() {
     const tab = await activeTab();
     const novel = identifyNovel(tab.url);
     if (!novel) return { novel: null };
-    const glossary = await glossaryStore.get(novel.site, novel.novelId);
-    return { novel, glossary, run: publicRun(runs.get(tab.id)) };
+    return {
+      novel,
+      glossary: await glossaryStore.get(novel.site, novel.novelId),
+      auto: await isAuto(novel.site, novel.novelId),
+      cache: await chapterCache.stats(),
+      run: publicRun(runs.get(tab.id)),
+    };
   },
 
+  /** Installed Ollama models, for the popup's dropdown. Fetched here because
+   *  only the extension's own context holds the localhost permission. */
+  async "models:list"() {
+    const selected = await chosenModel();
+    let res;
+    try {
+      res = await fetch(`${OLLAMA_HOST}/api/tags`);
+    } catch {
+      throw new Error(`Cannot reach Ollama at ${OLLAMA_HOST}. Is it running? Start it with "ollama serve".`);
+    }
+    if (res.status === 403) {
+      throw new Error('Ollama refused the extension (403). Run: setx OLLAMA_ORIGINS "chrome-extension://*" and restart Ollama.');
+    }
+    if (!res.ok) throw new Error(`Ollama returned HTTP ${res.status}.`);
+    const models = ((await res.json()).models || []).map((m) => m.name).sort();
+    return { models, selected };
+  },
+
+  async "model:set"(msg) {
+    await chrome.storage.local.set({ model: msg.model });
+    return { model: msg.model };
+  },
+
+  async "auto:set"(msg) {
+    await chrome.storage.local.set({ [autoKey(msg.site, msg.novelId)]: !!msg.on });
+    return { auto: !!msg.on };
+  },
+
+  async "cache:clear"() {
+    await chapterCache.clear();
+    return { cache: await chapterCache.stats() };
+  },
+
+  /**
+   * Save the glossary, then carry any renames into chapters already cached
+   * — and into the page on screen, if it is showing a cached chapter of this
+   * novel — so a correction does not wait for a re-translation.
+   */
   async "glossary:save"(msg) {
+    const before = await glossaryStore.get(msg.site, msg.novelId);
     const glossary = await glossaryStore.replaceAll(msg.site, msg.novelId, msg.categories);
-    return { glossary };
+    const renames = renamesBetween(before, glossary, CATEGORIES);
+    const rewritten = await chapterCache.rewriteNovel(msg.site, msg.novelId, renames);
+
+    if (renames.length) {
+      const tab = await activeTab();
+      const here = identifyNovel(tab.url);
+      if (here?.novelId === msg.novelId && runs.get(tab.id)?.status === "done") {
+        const chapter = await extractFromTab(tab).catch(() => null);
+        const hit = chapter &&
+          await chapterCache.get(chapter.site, chapter.novelId, chapter.chapterId, sourceHash(chapter.paragraphs));
+        if (hit) await tellTab(tab.id, { type: "replace:progress", translations: hit.translations, done: 1, total: 1, quiet: true });
+      }
+    }
+    return { glossary, rewritten };
   },
 
   /** The extracted chapter, for the popup to save as a local test fixture. */

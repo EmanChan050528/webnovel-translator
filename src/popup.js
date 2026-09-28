@@ -28,7 +28,10 @@ async function init() {
     (g.editedByHand ? " · edited by hand" : "");
   saved = g;
   $("glossary").value = toText(g);
+  $("auto").checked = !!res.auto;
+  renderCache(res.cache);
   $("chapterTools").hidden = false;
+  loadModels();
   refreshRun();
   setInterval(refreshRun, 1000);
 }
@@ -41,6 +44,7 @@ function renderRun(run) {
   $("translate").disabled = running;
   $("stop").hidden = !running;
   $("toggle").hidden = !run || run.done === 0 && run.status !== "done";
+  $("retranslate").hidden = running || run?.status !== "done";
   $("reader").hidden = !run?.resultId;
 
   if (!run) return note("status", "");
@@ -50,7 +54,9 @@ function renderRun(run) {
         ? `Translating on the page: ${run.done}/${run.total} chunks. You can close this popup.`
         : "Reading the chapter and building the glossary…");
     case "done":
-      return note("status", `Translated ${run.translated} paragraphs on the page.`);
+      return note("status", run.cached
+        ? `Loaded from cache: ${run.translated} paragraphs, no model run needed.`
+        : `Translated ${run.translated} paragraphs on the page.`);
     case "stopped":
       return note("status", `Stopped. ${run.translated ? `${run.translated} paragraphs` : "What was translated"} stays on the page.`);
     case "error":
@@ -62,21 +68,83 @@ async function refreshRun() {
   const res = await send({ type: "run:state" });
   if (!res?.ok) return;
   renderRun(res.run);
-  $("reapplied").textContent = res.reapplied
-    ? `The page re-rendered over the translation ${res.reapplied} time(s); each was corrected.`
-    : res.reapplied === 0 && res.run ? "Page re-renders corrected: 0" : "";
+  const lines = [
+    res.arrival,
+    res.run?.cacheNote,
+    res.reapplied
+      ? `The page re-rendered over the translation ${res.reapplied} time(s); each was corrected.`
+      : res.reapplied === 0 && res.run ? "Page re-renders corrected: 0" : "",
+  ].filter(Boolean);
+  $("reapplied").textContent = lines.join("\n");
 }
 
-$("translate").addEventListener("click", async () => {
+/** Installed Ollama models, ported from JP Subs' popup. The choice is stored
+ *  by the background, so chapters translated on arrival use it too. */
+async function loadModels() {
+  const select = $("model");
+  const res = await send({ type: "models:list" });
+  select.innerHTML = "";
+  const option = (value, label) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    select.append(opt);
+    return opt;
+  };
+
+  if (!res?.ok) {
+    option("", "(could not reach Ollama)");
+    return note("modelNote", res?.error || "Ollama unreachable.", true);
+  }
+  const { models, selected } = res;
+  if (!models.length) {
+    option("", "(no models installed)");
+    return note("modelNote", "Pull one first, e.g. ollama pull qwen3.5:9b", true);
+  }
+  for (const name of models) option(name, name).selected = name === selected;
+  // The stored model may have been removed since it was chosen.
+  if (!models.includes(selected)) {
+    option(selected, `${selected} (not installed)`).selected = true;
+    note("modelNote", `"${selected}" is not installed; pick another.`, true);
+  } else {
+    note("modelNote", "Smaller models are faster and quieter, and less accurate.");
+  }
+}
+
+$("model").addEventListener("change", async (e) => {
+  if (!e.target.value) return;
+  await send({ type: "model:set", model: e.target.value });
+  note("modelNote", "Saved. Used for every translation from now on, including automatic ones.");
+});
+
+async function translate(force) {
   $("translate").disabled = true;
   note("status", "Starting…");
-  const model = $("model").value.trim() || undefined;
-  const res = await send({ type: "translate-active-tab", options: { model } });
+  const res = await send({ type: "translate-active-tab", options: { force } });
   if (!res?.ok) {
     $("translate").disabled = false;
     return note("status", res?.error || "Something went wrong.", true);
   }
   renderRun(res.run);
+}
+
+$("translate").addEventListener("click", () => translate(false));
+$("retranslate").addEventListener("click", () => translate(true));
+
+$("auto").addEventListener("change", async (e) => {
+  await send({ type: "auto:set", site: novel.site, novelId: novel.novelId, on: e.target.checked });
+});
+
+function renderCache(stats) {
+  const kb = Math.round(stats.bytes / 1024);
+  const pct = Math.round((stats.bytes / stats.budget) * 100);
+  $("cacheStats").textContent =
+    `${stats.chapters} chapter${stats.chapters === 1 ? "" : "s"}, ${kb} KB (${pct}% of the ${Math.round(stats.budget / 1048576)} MB budget). Oldest-read chapters are dropped first when full.`;
+}
+
+$("clearCache").addEventListener("click", async () => {
+  const res = await send({ type: "cache:clear" });
+  if (res?.ok) renderCache(res.cache);
 });
 
 $("stop").addEventListener("click", async () => {
@@ -104,9 +172,12 @@ $("saveGlossary").addEventListener("click", async () => {
   const stale = staleCompounds(saved, res.glossary);
   saved = res.glossary;
   $("glossary").value = toText(res.glossary);
+  const rewritten = res.rewritten
+    ? ` Renames applied to ${res.rewritten} cached chapter${res.rewritten === 1 ? "" : "s"}.`
+    : "";
   note("glossaryNote", stale.length
-    ? "Saved, but check these — they still use a name you changed:\n" + stale.join("\n")
-    : "Saved. Used from the next translation of this novel on.");
+    ? `Saved.${rewritten} Check these — they still use a name you changed:\n` + stale.join("\n")
+    : `Saved.${rewritten} Used from the next translation of this novel on.`);
 });
 
 $("export").addEventListener("click", async () => {

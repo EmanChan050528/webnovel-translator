@@ -63,6 +63,13 @@ this folder. Open a Qidian chapter (`qidian.com/chapter/{bookId}/{chapterId}/`),
 click the extension icon, **Translate this chapter**. Opens the result in a
 new tab.
 
+Finished chapters are cached on your machine (about 370–400 chapters fit),
+so reopening one replaces it instantly with no model run. Tick **Translate
+this novel's chapters automatically** in the popup to have each new chapter
+of that novel translate as soon as you open it; other novels are never
+touched unless you ask. **Re-translate** skips the cache for the current
+chapter.
+
 The popup also shows the novel's glossary, one `term = English` per line
 under a `[names]` / `[factions]` / `[realms]` / `[techniques]` / `[terms]`
 heading. Glossary entries you already have always win over what a new

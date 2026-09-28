@@ -4,8 +4,8 @@ A browser extension that takes a Chinese web novel chapter on a supported
 site, translates it with a **local model through Ollama**, and replaces the
 Chinese text with English directly on the page, paragraph by paragraph.
 
-> **Status: Milestones 0–3 done. Next is Milestone 4, chapter flow and
-> caching.** This document is
+> **Status: Milestones 0–4 done. Next is Milestone 5, fallback polish and a
+> second site.** This document is
 > written the way [JP Subs' design doc](../Translator%20Project/translator-design.md)
 > ended up, not the way it started: predictions are kept next to their
 > corrections rather than silently replaced, and every claim below is either
@@ -21,9 +21,10 @@ Chinese text with English directly on the page, paragraph by paragraph.
 | 1 — Translate MVP, no live overlay | **Done.** CLI: 54/54 paragraphs, 0 failures (§1.4). Extension: failed on first load (static imports in a content script), fixed, then translated a live chapter end to end into the reader tab (§1.5). Quality is *fluent*, not checked *accurate* — see §Questions. |
 | 2 — Glossary system | **Done.** Per-novel storage, existing-entries-win merge, hand edits and deletions that stick, a popup editor, and a fixture exporter. Three defects in the first version found and fixed (§2.3), the worst being that every glossary key came back in pinyin, which silently disabled the merge rule. Hand edits verified reaching the translation (§2.4). Across two real chapters, all 6 recurring terms kept chapter 1's rendering (§2.5). Not yet seen: storage overriding a *naturally* conflicting proposal between chapters. |
 | 3 — Live in-place replacement | **Done.** Paragraphs replaced as each chunk finishes, original/English toggle, on-page progress with Stop, run state owned by the background (no more popup resets or duplicate runs). The Vue re-render risk was checked first (0 page mutations from scroll, night mode, idle) and guarded anyway; the guard's own simulation caught a bug that stripped paragraph indentation (§3.2). Found: Qidian marks its pages `notranslate` (§3.4). |
-| 4 — Chapter flow and caching | **Not built.** Design notes only, §4. |
+| 4 — Chapter flow and caching | **Done.** Cached chapters replaced instantly on arrival; opted-in novels translated on arrival; no prefetch (Design principle). Cache is local, versioned, fingerprinted against edited chapters, and fits ~370–400 real chapters (§4.2). Glossary renames now rewrite cached chapters (§4.3). |
 | 5 — Fallback polish, second site | **Half-built by accident.** The Milestone 1 reader tab (`src/reader.html`) already **is** the fallback view Milestone 5 asks for — it just isn't wired to trigger automatically yet. Second site: not started. |
 | 6 — Stretch: JP/KR | **Not started, deliberately.** `core/prompt.js` is already shaped to take a second language as a data addition, the way JP Subs' Korean support was — see §6. |
+| 7 — UI redesign | **Not started, by design.** A more modern look for the popup, page pill and reader tab, once the controls stop changing (§7). |
 
 **Reuse from JP Subs, checked against the actual files rather than assumed
 from the brief:** `core/backends.js` and `core/chunk.js` ported with no
@@ -654,28 +655,100 @@ user's decision, 2026-09-28. Recorded so that choice stays visible.
 
 ## Milestone 4 — Chapter flow and caching
 
-**Not built.** Design notes only.
+**Done (0.4.x).** Clicked through 2026-09-28: a reloaded chapter comes
+back from the cache, and auto-translate picks up the next chapter on
+arrival — after one fix, below.
 
-- **Detect navigation to the next chapter.** `extractChapter()` already
-  returns `nextChapterUrl`; Qidian chapter-to-chapter navigation is a normal
-  page load (confirmed during §0.2 scouting — the "下一章" link is a plain
-  `<a>`, not a client-side route), so this is likely a fresh content-script
-  run on the next URL rather than an SPA-navigation listener. Worth
-  confirming directly rather than assuming, the way §0.3's VIP behaviour was
-  confirmed rather than assumed.
-- **Cache finished chapters, local only.** Same reasoning as JP Subs' §4.2,
-  and it matters more here given the Design principle stated at the top of
-  this document: a shared cache would start turning "a translation overlay
-  for the one person reading" into a redistribution question. `chrome.
-  storage.local`'s 10 MB cap is the same constraint JP Subs hit; a novel
-  chapter (§1.4's fixture: 54 paragraphs, a few thousand characters) is much
-  smaller than a video's subtitle track, so the practical cap is likely
-  "many more chapters" rather than "about twenty" — not yet measured.
-- **Version the cache** the way JP Subs does, so a `prompt.js` or
-  `pipeline.js` change invalidates chapters translated under the old rules
-  rather than serving stale results silently.
-- **No prefetch-ahead-of-reading by default.** This needs to be a deliberate
-  decision, not a default, given the Design principle — see §Questions.
+> **First real use: "reloaded, no cache and no English."** Not diagnosable
+> as reported — Qidian breaks DevTools, and the popup said nothing about the
+> cache. Two defects in my own code could each explain it, both fixed:
+> (1) on arrival the content script read the chapter as soon as *any*
+> paragraph existed, so a page still rendering gave a partial read, a
+> different fingerprint — and the lookup then **deleted** the good cached
+> entry as if the chapter had been edited. Arrival now waits for the
+> paragraph count to hold steady, and a fingerprint mismatch is a miss that
+> never deletes. (2) A chapter with any failed paragraph is deliberately not
+> cached, and nothing said so. The popup now reports both the arrival
+> outcome ("loaded from cache" / "not in cache" / "cached for a different
+> version: N cached, M on the page") and the save outcome after each run,
+> so the next cache report explains itself.
+>
+> **A second gap found while fixing the model picker:** the model was read
+> only from the popup's text box on a Translate click, so chapters
+> translated on arrival always used the default model. The popup now lists
+> the models Ollama has installed (ported from JP Subs) and the choice is
+> stored, so every path uses it.
+
+### 4.1 Chapter flow
+
+**Navigation needs no special detection.** §3.2's check confirmed one page
+is one chapter — scrolling never loads the next chapter inline — so the
+下一章 link is an ordinary page load and the content script simply runs again
+on arrival. It extracts the chapter and tells the background, which does one
+of three things:
+
+1. **The chapter is cached** → replaced at once, no model run. This happens
+   for every novel, since it costs nothing.
+2. **Not cached, and the user opted this novel in** ("Translate this novel's
+   chapters automatically" in the popup) → translated on arrival.
+3. **Otherwise nothing.** Opening a Qidian page never starts GPU work on its
+   own — auto-translation is per novel, never global.
+
+**Race avoided by design.** When the background injects `content.js` into a
+tab that was open before the extension loaded, it does so in the middle of
+its own request. If that injected copy also announced an arrival, the
+background would start a second run for the same chapter. The background now
+sets a flag before injecting, and only a copy loaded *with* the page
+announces.
+
+**No prefetch.** Translating the next chapter while the current one is still
+being read would mean fetching a page the reader has not opened — the one
+thing the Design principle rules out. "Translate on arrival" gets most of
+the benefit: the wait moves from "click, then wait" to "open, and it starts."
+Stays in §Questions as an explicit opt-in to decide, not a default.
+
+### 4.2 Cache
+
+`src/core/cache.js`, ported from JP Subs' cache (§4.2 there) and
+storage-injected like `glossary.js`, so it is tested without the browser
+(`cache.test.mjs`, 12 cases).
+
+- **Local only**, same as JP Subs, for the reason the Design principle gives.
+- **7 MB budget, least-recently-*read* chapters evicted first** — reading a
+  cached chapter counts as use, not just writing it.
+- **Versioned** (`PIPELINE_VERSION`): bump it and every chapter translated
+  by an older prompt or pipeline is re-translated on its next visit instead
+  of served stale.
+- **Fingerprinted.** Web novel authors revise published chapters. Each entry
+  stores a hash of the chapter's source text; if the text changes, the
+  cached translation is discarded rather than laid over different
+  paragraphs. Something JP Subs never needed — a video's captions do not get
+  edited after the fact.
+- **Only complete translations are cached.** A chapter with even one failed
+  paragraph is shown but not stored, so the next visit retries it — JP Subs'
+  rule, for the same reason: a half-finished result that looks finished is
+  worse than one that plainly needs another run.
+- **A failed write never fails the run** — the translation is already on
+  the page.
+
+**Measured size**, from the two real 九君齐天 runs (§2.5): 19,626 bytes for
+a 152-paragraph chapter, 18,059 for 147. **About 370–400 chapters fit in
+the budget** — against JP Subs' "about twenty" long videos. The §0 prediction
+("many more chapters") holds, now with a number.
+
+### 4.3 Glossary corrections reach cached chapters
+
+Deferred from §2.2 until there was a cache to rewrite. Saving the glossary
+now finds every rename (old English → new English), rewrites the English of
+every cached chapter of that novel, and pushes the change into the page on
+screen if it is showing one. Ported from JP Subs' `glossary:apply`, with one
+fix §2.4 made necessary: **longer renderings are replaced first, in a single
+pass**. Renaming "Dou Qi" and "Dou Qi Spiral" in the same save otherwise
+turns "Dou Qi Spiral" into "Battle Qi Spiral" before the longer rename can
+match it. The first version of the port tracked already-replaced spans by
+offset, and the offsets shifted as replacements changed the line's length —
+replaced before shipping with one combined, longest-first pattern
+(`glossary-apply.test.mjs`: JP Subs' nine cases kept as-is, plus five).
 
 ---
 
@@ -720,6 +793,19 @@ rate, speaker markers) before any code changed.
 
 ---
 
+## Milestone 7 — UI redesign
+
+**Added 2026-09-28 at the user's request; deliberately after the main
+milestones, not started.** Redesign the popup, the on-page pill and the
+reader tab to a more modern look. Scheduled last on purpose: every milestone
+so far has added or moved controls (the model dropdown, the cache and
+auto-translate controls, the diagnostic lines), so styling them now would be
+redone as they keep changing. Until then the rule is function first — keep
+the existing plain look, and don't let visual work slip into feature
+milestones.
+
+---
+
 ## Build Order
 
 1. ✅ **Site scouting and adapter — Qidian.** `src/site-adapters/qidian.js`.
@@ -753,7 +839,8 @@ rate, speaker markers) before any code changed.
 8. ✅ **In-place replacement** (0.3.0). Vue risk checked first, then
    guarded (§3.2); clicked through on a real chapter. The re-render count
    is shown in the popup.
-9. ⬜ Chapter navigation detection and local caching (§4).
+9. ✅ **Chapter flow and caching** (0.4.x, §4). Cache and auto-translate
+   confirmed in real use after the arrival fix.
 10. ⬜ Fallback routing logic connecting Milestone 3's failure cases to the
    already-built `reader.html` (§5), plus a second site adapter.
 11. Not planned yet: JP/KR (§6), prefetch-ahead-of-reading (open question

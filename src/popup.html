@@ -12,14 +12,17 @@
     button:disabled { cursor: default; opacity: 0.6; }
     button.secondary { margin-top: 6px; }
     label { display: block; margin-bottom: 4px; font-size: 12px; }
-    input { width: 100%; box-sizing: border-box; padding: 4px; margin-bottom: 8px; }
+    input, select { width: 100%; box-sizing: border-box; padding: 4px; }
+    select { margin-bottom: 2px; }
     textarea {
       width: 100%; box-sizing: border-box; height: 220px; resize: vertical;
       font: 12px/1.5 ui-monospace, Consolas, "Microsoft YaHei", monospace; padding: 6px;
     }
     .note { margin-top: 6px; font-size: 12px; color: #555; white-space: pre-wrap; }
     .note.error { color: #b00020; }
-    .hint { font-size: 11px; color: #777; margin: 2px 0 6px; }
+    .hint { font-size: 11px; color: #777; margin: 2px 0 6px; white-space: pre-wrap; }
+    label.check { display: flex; gap: 6px; align-items: flex-start; margin-top: 10px; font-size: 12px; }
+    label.check input { width: auto; margin: 2px 0 0; }
     .row { display: flex; gap: 6px; }
     .row button { flex: 1; }
     [hidden] { display: none !important; }
@@ -31,15 +34,22 @@
 
   <section id="chapterTools" hidden>
     <label for="model">Model (Ollama)</label>
-    <input id="model" value="qwen3.5:9b" />
+    <select id="model"><option>Loading models…</option></select>
+    <div class="hint" id="modelNote"></div>
     <button id="translate">Translate this chapter</button>
     <div class="row">
       <button id="stop" class="secondary" hidden>Stop</button>
       <button id="toggle" class="secondary" hidden>Show original</button>
+      <button id="retranslate" class="secondary" hidden>Re-translate</button>
       <button id="reader" class="secondary" hidden>Open in reader tab</button>
     </div>
     <div class="note" id="status"></div>
     <div class="hint" id="reapplied"></div>
+    <label class="check"><input type="checkbox" id="auto" /> Translate this novel's chapters automatically when I open them</label>
+
+    <h2>Cache</h2>
+    <div class="hint" id="cacheStats"></div>
+    <button id="clearCache" class="secondary">Clear cached chapters</button>
 
     <h2>Glossary for this novel</h2>
     <div class="hint">One <code>term = English</code> per line, under a [section]. Existing entries always win over new chapters; a term you delete stays deleted.</div>
