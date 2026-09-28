@@ -11,6 +11,7 @@ import { run as runPipeline } from "./core/pipeline.js";
 import { makeGlossaryStore, CATEGORIES } from "./core/glossary.js";
 import { makeChapterCache, sourceHash } from "./core/cache.js";
 import { renamesBetween } from "./core/glossary-apply.js";
+import { looksScrambled } from "./core/text-check.js";
 import { identifyNovel } from "./site-adapters/index.js";
 
 const storage = {
@@ -84,14 +85,23 @@ async function ensureContentScript(tabId) {
 
 /** @param prime - true when starting a run: the content script keeps the live
  *  paragraph elements and resets its replacement state. Export must not. */
-async function extractFromTab(tab, { prime = false } = {}) {
+async function extractFromTab(tab, { prime = false, withFallback = false } = {}) {
   if (!identifyNovel(tab.url)) {
-    throw new Error("This tab isn't a supported chapter page. Open a qidian.com/chapter/... page first.");
+    throw new Error(
+      "This tab isn't a supported chapter page (Qidian or Jinjiang). " +
+      "For any other site, use \"Paste a chapter\" in the popup."
+    );
   }
   await ensureContentScript(tab.id);
   const res = await chrome.tabs.sendMessage(tab.id, { type: "extract-chapter", prime });
   if (!res?.ok) throw new Error(res?.error || "Extraction failed.");
-  return res.chapter;
+  return withFallback ? { chapter: res.chapter, fallback: res.fallback || null } : res.chapter;
+}
+
+async function openReader(resultId) {
+  await chrome.tabs.create({
+    url: chrome.runtime.getURL(`src/reader.html?result=${encodeURIComponent(resultId)}`),
+  });
 }
 
 /** Best-effort message to the page; a closed or navigated tab is not an error
@@ -126,7 +136,11 @@ async function isAuto(site, novelId) {
  * @param chapter - already extracted *and primed* in the content script
  * @param force - skip the cache (the popup's Re-translate)
  */
-async function beginRun(tabId, chapter, { force = false } = {}) {
+/**
+ * @param fallback - why this chapter cannot be replaced in place, if it
+ *   cannot; the translation then opens in the reader tab when finished.
+ */
+async function beginRun(tabId, chapter, { force = false, fallback = null } = {}) {
   const model = await chosenModel();
   if (runs.get(tabId)?.status === "running") {
     throw new Error("Already translating this tab. Stop it first, or wait for it to finish.");
@@ -136,6 +150,14 @@ async function beginRun(tabId, chapter, { force = false } = {}) {
       "This chapter looks paywalled — the page returned only a short preview, " +
       "not the full text. Log in with a subscription that covers it and reload, " +
       "or pick a chapter you already have access to."
+    );
+  }
+  if (looksScrambled(chapter.paragraphs)) {
+    throw new Error(
+      "This page's text is scrambled by an anti-copy font: what the page " +
+      "shows is not what its text actually contains, so there is nothing " +
+      "readable to translate. Copying or pasting it would copy the same " +
+      "scrambled characters."
     );
   }
 
@@ -153,11 +175,16 @@ async function beginRun(tabId, chapter, { force = false } = {}) {
         total: 1,
         translated: hit.translations.filter(Boolean).length,
         error: null,
+        fallback,
         resultId: await storeResult(chapter, hit.translations, []),
       };
       runs.set(tabId, run);
-      await tellTab(tabId, { type: "replace:progress", translations: hit.translations, done: 1, total: 1 });
-      await tellTab(tabId, { type: "replace:finished", translated: run.translated, total, cached: true });
+      if (fallback) {
+        await openReader(run.resultId);
+      } else {
+        await tellTab(tabId, { type: "replace:progress", translations: hit.translations, done: 1, total: 1 });
+        await tellTab(tabId, { type: "replace:finished", translated: run.translated, total, cached: true });
+      }
       return publicRun(run);
     }
   }
@@ -170,6 +197,7 @@ async function beginRun(tabId, chapter, { force = false } = {}) {
     total: 0,
     translated: 0,
     error: null,
+    fallback,
     resultId: null,
     controller: new AbortController(),
   };
@@ -226,6 +254,9 @@ async function translateInPlace(tabId, chapter, hash, run, model) {
         });
         run.cacheNote = saved ? `Saved to cache (${total} paragraphs).` : "Could not write to the cache (storage full or unavailable).";
       }
+      // In-place replacement was ruled out (before the run, or by the page
+      // rearranging itself during it): the reader tab is the result.
+      if (run.fallback) await openReader(run.resultId);
     }
     tellTab(tabId, { type: "replace:finished", translated: result.translated, total, stopped: !!result.stopped });
   } catch (err) {
@@ -267,8 +298,16 @@ async function activeTab() {
 const HANDLERS = {
   async "translate-active-tab"(msg) {
     const tab = await activeTab();
-    const chapter = await extractFromTab(tab, { prime: true });
-    return { run: await beginRun(tab.id, chapter, msg.options || {}) };
+    const { chapter, fallback } = await extractFromTab(tab, { prime: true, withFallback: true });
+    return { run: await beginRun(tab.id, chapter, { ...(msg.options || {}), fallback }) };
+  },
+
+  /** The page gave up replacing in place mid-run (content.js abandon()):
+   *  finish the run anyway and open the result in the reader tab. */
+  async "page:fallback"(msg, sender) {
+    const run = runs.get(sender.tab?.id);
+    if (run) run.fallback = msg.reason;
+    return {};
   },
 
   /**
@@ -282,6 +321,20 @@ const HANDLERS = {
     const chapter = msg.chapter;
     if (tabId === undefined || !chapter || chapter.locked) return { action: "none" };
     if (runs.get(tabId)?.status === "running") return { action: "none" };
+    // Pages that cannot be replaced in place are left alone on arrival:
+    // opening a new tab unasked, every time a chapter loads, is not a
+    // reasonable default. Translate from the popup opens the reader tab.
+    if (msg.fallback) {
+      arrivals.set(tabId, {
+        chapterId: chapter.chapterId,
+        note: `On arrival: ${msg.fallback} Use Translate to read it in a reader tab.`,
+      });
+      return { action: "none" };
+    }
+    if (looksScrambled(chapter.paragraphs)) {
+      arrivals.set(tabId, { chapterId: chapter.chapterId, note: "On arrival: this page's text is scrambled by an anti-copy font; nothing readable to translate." });
+      return { action: "none" };
+    }
 
     const hash = sourceHash(chapter.paragraphs);
     const found = await chapterCache.lookup(chapter.site, chapter.novelId, chapter.chapterId, hash);

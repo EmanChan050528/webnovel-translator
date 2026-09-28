@@ -59,14 +59,22 @@ function looksLocked(doc, paragraphs) {
   return paywallMarker && paragraphs.length < 5;
 }
 
+/** The element the re-render guard in content.js watches. */
+export function contentRoot(doc = document) {
+  return doc.querySelector("main.content");
+}
+
 /**
+ * The adapter contract (Milestone 5 made it explicit, by needing a second
+ * site whose paragraphs are not elements):
+ *
  * @returns {object|null} null if this is not a chapter page or has no
  *   recognisable content root. Otherwise:
  *   { site, novelId, chapterId, novelTitle, chapterTitle, paragraphs, nextChapterUrl, prevChapterUrl, locked }
- *   `paragraphs` is [{ index, zh, el }] — `el` is the live DOM node, kept for
- *   Milestone 3's in-place replacement; strip it (see toPayload below) before
- *   sending a chapter across a runtime.sendMessage boundary, which cannot
- *   serialise DOM nodes.
+ *   `paragraphs` is [{ index, zh, nodes }] — `nodes` are the live Text nodes
+ *   the paragraph is made of, which content.js rewrites in place. Strip them
+ *   (toPayload below) before a chapter crosses a runtime.sendMessage
+ *   boundary, which cannot serialise DOM nodes.
  */
 export function extractChapter(doc = document) {
   const ids = idsFromUrl(doc.location ? doc.location.href : location.href);
@@ -85,7 +93,11 @@ export function extractChapter(doc = document) {
   const chapterTitle = directText(doc.querySelector("h1.title")) || null;
 
   const paragraphs = Array.from(main.querySelectorAll(":scope > p"))
-    .map((el, index) => ({ index, zh: directText(el.querySelector(".content-text") || el), el }))
+    .map((el, index) => {
+      const host = el.querySelector(".content-text") || el;
+      const nodes = Array.from(host.childNodes).filter((n) => n.nodeType === Node.TEXT_NODE);
+      return { index, zh: directText(host), nodes };
+    })
     .filter((p) => p.zh.length > 0);
 
   return {
@@ -101,10 +113,8 @@ export function extractChapter(doc = document) {
   };
 }
 
-/** Strip DOM element references so a chapter can cross a message boundary
- *  (content script -> service worker). Milestone 3's in-place replacement
- *  runs entirely inside the content script and can use extractChapter()'s
- *  `el` refs directly without ever needing this. */
+/** Strip live DOM references so a chapter can cross a message boundary
+ *  (content script -> service worker). */
 export function toPayload(chapter) {
   if (!chapter) return chapter;
   const { paragraphs, ...rest } = chapter;

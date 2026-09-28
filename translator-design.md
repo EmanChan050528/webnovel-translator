@@ -4,8 +4,8 @@ A browser extension that takes a Chinese web novel chapter on a supported
 site, translates it with a **local model through Ollama**, and replaces the
 Chinese text with English directly on the page, paragraph by paragraph.
 
-> **Status: Milestones 0–4 done. Next is Milestone 5, fallback polish and a
-> second site.** This document is
+> **Status: Milestones 0–5 done. Remaining: Milestone 6 (JP/KR, stretch)
+> and Milestone 7 (UI redesign).** This document is
 > written the way [JP Subs' design doc](../Translator%20Project/translator-design.md)
 > ended up, not the way it started: predictions are kept next to their
 > corrections rather than silently replaced, and every claim below is either
@@ -22,7 +22,7 @@ Chinese text with English directly on the page, paragraph by paragraph.
 | 2 — Glossary system | **Done.** Per-novel storage, existing-entries-win merge, hand edits and deletions that stick, a popup editor, and a fixture exporter. Three defects in the first version found and fixed (§2.3), the worst being that every glossary key came back in pinyin, which silently disabled the merge rule. Hand edits verified reaching the translation (§2.4). Across two real chapters, all 6 recurring terms kept chapter 1's rendering (§2.5). Not yet seen: storage overriding a *naturally* conflicting proposal between chapters. |
 | 3 — Live in-place replacement | **Done.** Paragraphs replaced as each chunk finishes, original/English toggle, on-page progress with Stop, run state owned by the background (no more popup resets or duplicate runs). The Vue re-render risk was checked first (0 page mutations from scroll, night mode, idle) and guarded anyway; the guard's own simulation caught a bug that stripped paragraph indentation (§3.2). Found: Qidian marks its pages `notranslate` (§3.4). |
 | 4 — Chapter flow and caching | **Done.** Cached chapters replaced instantly on arrival; opted-in novels translated on arrival; no prefetch (Design principle). Cache is local, versioned, fingerprinted against edited chapters, and fits ~370–400 real chapters (§4.2). Glossary renames now rewrite cached chapters (§4.3). |
-| 5 — Fallback polish, second site | **Half-built by accident.** The Milestone 1 reader tab (`src/reader.html`) already **is** the fallback view Milestone 5 asks for — it just isn't wired to trigger automatically yet. Second site: not started. |
+| 5 — Fallback polish, second site | **Done.** Reader-tab fallback when a page can't be rewritten cleanly; scrambled text refused with a measured check (Fanqie: 69.5% private-use characters); a paste tab for any other site (§5.1). Jinjiang adapter checked on a live page — and it changed the adapter contract, because its paragraphs aren't elements (§5.2). |
 | 6 — Stretch: JP/KR | **Not started, deliberately.** `core/prompt.js` is already shaped to take a second language as a data addition, the way JP Subs' Korean support was — see §6. |
 | 7 — UI redesign | **Not started, by design.** A more modern look for the popup, page pill and reader tab, once the controls stop changing (§7). |
 
@@ -754,21 +754,68 @@ replaced before shipping with one combined, longest-first pattern
 
 ## Milestone 5 — Fallback polish, second site
 
-**Half-built by accident.** `src/reader.html`/`reader.js`, built for
-Milestone 1 as the *only* output (there was no in-place mode to fall back
-from yet), already has the right shape for Milestone 5's fallback view: it
-renders a chapter's paragraphs with an original/English toggle, independent
-of any specific site. What's missing is the *decision logic* — something
-that decides in-place replacement isn't safe on a given page (a Fanqie-style
-obfuscated site, a raw pasted chapter, a site adapter that fails partway) and
-routes to this view instead of trying and failing silently. That decision
-point doesn't exist because Milestone 3 doesn't exist yet.
+**Done (0.5.0).** Jinjiang confirmed working in the installed extension,
+2026-09-28.
 
-**Second site.** `src/site-adapters/index.js` is a two-line registry
-specifically so this is additive — Fanqie is disqualified (§0.1) without a
-deobfuscation subsystem, so the next real candidate is either Jinjiang
-(same font-obfuscation family expected on VIP content, unverified) or a
-second, less VIP-aggressive corner of Qidian's own catalog. Not started.
+One expectation corrected in the same test: Fanqie shows "not a supported
+chapter page", not the scrambled-text refusal. Correct behaviour — Fanqie
+has no adapter, so the refusal can only trigger on supported sites and in
+the paste tab. On Fanqie the popup's suggestion to paste leads to the paste
+tab, which refuses the scrambled text with the reason, so the path still
+ends in an explanation rather than a mistranslation.
+
+### 5.1 Fallback — three cases, only two of which a reader tab can help
+
+The brief grouped "obfuscated text, anti-scraping tricks, a raw pasted
+chapter" together as reasons to fall back to a reader tab. Working through
+what actually fails split them apart:
+
+| Case | What happens | Why |
+|---|---|---|
+| Text is readable, but the page can't be rewritten cleanly | **Reader tab.** Decided before touching the page if the adapter marks a paragraph unsafe (formatting inside the prose); decided mid-run if the page rearranges its paragraphs so they can no longer be matched by position. Either way the original text is put back first, the run finishes, and the result opens in the reader tab. | The translation is fine; only writing it into this DOM isn't. |
+| Text is scrambled by an anti-copy font | **Refused, with the reason.** | Nothing readable exists. The reader tab can't help, and neither can pasting — copying the page copies the same scrambled code points. |
+| A site the extension doesn't support | **Paste tab** (`src/paste.html`), reachable from the popup on any page. Optional: pick a remembered novel so its glossary applies and grows. Not cached — pasted text has no chapter identity. | The brief's "raw pasted chapter". |
+
+**The scrambled check is measured, not assumed.** Font obfuscation serves
+private-use code points that a custom font draws as real characters.
+`core/text-check.js` refuses a chapter when more than 2% of its meaningful
+characters are private-use. Measured on the Fanqie chapter from §0.1:
+**623 of 896 characters (69.5%)** — the garbage that section described, now
+with a mechanism and a number. Real chapters on Qidian and Jinjiang: 0.
+
+Before this, the §3.2 guard's "different paragraph count" case just stopped
+replacing and logged to a console nobody could open. It now falls back.
+
+### 5.2 Second site: Jinjiang — and the adapter contract did not generalise
+
+Checked against free chapters of one novel on 2026-09-28. Free chapters
+(`onebook.php?novelid=…&chapterid=…`) are plain text: no custom fonts, no
+private-use characters. VIP chapters are out of scope, as on Qidian.
+
+**The finding that matters: a Jinjiang paragraph is not an element.** The
+chapter is loose text inside `#paragraph_comment_content` — one text node
+per paragraph, separated by pairs of `<br>` (chapter 2: 52 text nodes,
+102 `<br>`). The content script, written against Qidian, held one element
+per paragraph and looked inside it for `.content-text`, which is Qidian's
+class leaking into supposedly site-independent code — the same kind of
+coupling JP Subs found when Korean arrived (its §0.1). **The contract changed:**
+an adapter now hands over each paragraph's text nodes, plus the root
+element the re-render guard should watch. Text nodes are what both sites
+have in common, and the in-place rewrite never touched anything else
+anyway.
+
+Smaller differences an adapter absorbed without the contract noticing:
+IDs come from query parameters rather than the path; the chapter title is an
+`h2`; the novel title comes from `《…》` in the tab title (as Qidian's
+fallback does); nav links read "下一章→" with an arrow, so matching is by
+"contains", not exact text; a catalog page has a `novelid` but no
+`chapterid` and must not count as a chapter.
+
+**Checked on the live page** (the real adapter code, placeholders instead of
+translations): IDs, both titles and both nav links found; 52 paragraphs,
+none unsafe, not locked; 10 placeholders written with every `<br>`
+untouched; re-extracting while English is showing still finds 52 (so
+position-based rebinding holds); all 52 restored byte-identical.
 
 ---
 
@@ -841,7 +888,8 @@ milestones.
    is shown in the popup.
 9. ✅ **Chapter flow and caching** (0.4.x, §4). Cache and auto-translate
    confirmed in real use after the arrival fix.
-10. ⬜ Fallback routing logic connecting Milestone 3's failure cases to the
+10. ✅ **Fallback and second site** (0.5.0, §5). Jinjiang confirmed in the
+    installed extension. Was: Fallback routing logic connecting Milestone 3's failure cases to the
    already-built `reader.html` (§5), plus a second site adapter.
 11. Not planned yet: JP/KR (§6), prefetch-ahead-of-reading (open question
    below), a shared/hosted glossary or cache (ruled out by the Design

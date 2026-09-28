@@ -1,10 +1,11 @@
-// Site adapter registry. One adapter today (Milestone 0); Milestone 5 adds a
-// second one to prove this pattern actually generalises rather than being
-// qidian.js with extra steps.
+// Site adapter registry. Qidian (Milestone 0) and Jinjiang (Milestone 5, the
+// second site that tested whether the adapter pattern generalises — it did
+// not, as first written, and the contract changed; design doc §5.2).
 
 import * as qidian from "./qidian.js";
+import * as jjwxc from "./jjwxc.js";
 
-const ADAPTERS = [qidian];
+const ADAPTERS = [qidian, jjwxc];
 
 export function adapterForUrl(url) {
   return ADAPTERS.find((a) => a.isChapterPage(url)) || null;
@@ -17,4 +18,4 @@ export function identifyNovel(url) {
   return ids ? { site: adapter.site, ...ids } : null;
 }
 
-export { qidian };
+export { qidian, jjwxc };

@@ -18,7 +18,7 @@ async function init() {
     return;
   }
   if (!res.novel) {
-    $("novel").textContent = "Not a supported chapter page. Open a qidian.com/chapter/… page.";
+    $("novel").textContent = "Not a supported chapter page (Qidian or Jinjiang). For other sites, paste the chapter.";
     return;
   }
   novel = res.novel;
@@ -159,6 +159,8 @@ $("toggle").addEventListener("click", async () => {
 });
 
 $("reader").addEventListener("click", () => send({ type: "reader:open" }));
+
+$("paste").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("src/paste.html") }));
 
 $("saveGlossary").addEventListener("click", async () => {
   const { categories, errors } = fromText($("glossary").value);

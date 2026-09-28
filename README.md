@@ -63,6 +63,12 @@ this folder. Open a Qidian chapter (`qidian.com/chapter/{bookId}/{chapterId}/`),
 click the extension icon, **Translate this chapter**. Opens the result in a
 new tab.
 
+Supported sites: **Qidian** (qidian.com/chapter/…) and **Jinjiang** free
+chapters (jjwxc.net/onebook.php…). For any other site, **Paste a chapter**
+in the popup opens a tab where you paste the text and translate it there. A
+page whose text is scrambled by an anti-copy font (e.g. Fanqie) is refused
+with the reason — there is nothing readable to translate.
+
 Finished chapters are cached on your machine (about 370–400 chapters fit),
 so reopening one replaces it instantly with no model run. Tick **Translate
 this novel's chapters automatically** in the popup to have each new chapter

@@ -118,5 +118,17 @@ export function makeGlossaryStore(storage) {
     if (drop.length) await storage.remove(drop);
   }
 
-  return { get, remember, replaceAll };
+  /** Every remembered novel, for the paste tab's novel picker. */
+  async function list() {
+    const all = await storage.get(null);
+    return Object.entries(all)
+      .filter(([k]) => k.startsWith(KEY_PREFIX))
+      .map(([k, v]) => {
+        const [site, novelId] = k.slice(KEY_PREFIX.length).split(":");
+        return { site, novelId, title: v.title, chapters: v.chapters || 0 };
+      })
+      .sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+  }
+
+  return { get, remember, replaceAll, list };
 }

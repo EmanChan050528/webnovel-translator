@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Paste a chapter — Webnovel Translator</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 15px/1.6 system-ui, sans-serif; max-width: 760px; margin: 0 auto; padding: 32px 24px 80px; color: #222; background: #fdfdfb; }
+    @media (prefers-color-scheme: dark) { body { color: #ddd; background: #1b1b1b; } }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: #777; font-size: 13px; margin: 0 0 20px; }
+    label { display: block; font-size: 13px; margin: 12px 0 4px; }
+    textarea { width: 100%; box-sizing: border-box; height: 260px; font: 15px/1.6 "Microsoft YaHei", system-ui, sans-serif; padding: 10px; }
+    select { padding: 4px; max-width: 100%; }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    button { padding: 7px 14px; font-size: 14px; cursor: pointer; }
+    .status { font-size: 13px; color: #666; white-space: pre-wrap; }
+    .status.error { color: #b00020; }
+    #result { margin-top: 28px; font: 17px/1.7 Georgia, "Songti SC", serif; }
+    #result p { margin: 0 0 1.1em; }
+    #result .zh { display: none; color: #888; font-size: 0.92em; }
+    body.show-original #result .zh { display: block; }
+    #result .missing { color: #b00020; font-style: italic; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Paste a chapter</h1>
+  <p class="sub">For a site the extension can't read directly. One paragraph per line. Translated with your local model; nothing is uploaded or saved except glossary entries, if you pick a novel.</p>
+
+  <textarea id="source" placeholder="粘贴章节正文……"></textarea>
+
+  <label for="novel">Use a novel's glossary (optional)</label>
+  <select id="novel"><option value="">None — translate without a glossary</option></select>
+
+  <div class="row">
+    <button id="go">Translate</button>
+    <button id="stop" hidden>Stop</button>
+    <button id="toggle" hidden>Show original</button>
+    <span class="status" id="status"></span>
+  </div>
+
+  <div id="result"></div>
+</body>
+<script src="paste.js" type="module"></script>
+</html>

@@ -41,40 +41,31 @@
 
   // ------------------------------------------------------------ replacement
   //
-  // Only the paragraph's own direct text nodes are touched, and only by
-  // setting nodeValue — never by replacing or removing nodes. Qidian renders
-  // this with Vue, whose virtual DOM holds references to these exact nodes;
-  // swapping the node out from under it is how a later re-render would lose
-  // track of the paragraph. The sibling span.review badge is left alone.
+  // Each paragraph is the list of live Text nodes the adapter says it is made
+  // of (the adapter contract, design doc §5.2 — Qidian's paragraphs are
+  // elements, Jinjiang's are loose text between <br>s, and text nodes are
+  // what both have). They are rewritten only by setting nodeValue, never
+  // replaced or removed: Qidian renders with Vue, whose virtual DOM holds
+  // references to these exact nodes. Anything else in the paragraph, such as
+  // Qidian's span.review badge, is left alone.
 
   const state = {
     adapter: null,
     chapterId: null,
-    items: [], // [{ el, zh, en }] — parallel to the paragraphs sent for translation
+    items: [], // [{ nodes, zh, raw, en }] — parallel to the paragraphs sent for translation
     showing: "en",
     reapplied: 0,
     observer: null,
+    fallback: null, // why in-place replacement was abandoned, if it was
   };
 
-  function textHost(p) {
-    return p.querySelector(".content-text") || p;
+  function readNodes(nodes) {
+    return nodes.map((n) => n.nodeValue).join("");
   }
 
-  function setDirectText(el, text) {
-    const nodes = Array.from(el.childNodes).filter((n) => n.nodeType === Node.TEXT_NODE);
-    if (!nodes.length) {
-      el.insertBefore(document.createTextNode(text), el.firstChild);
-      return;
-    }
+  function writeNodes(nodes, text) {
     nodes[0].nodeValue = text;
     for (const n of nodes.slice(1)) n.nodeValue = "";
-  }
-
-  function directText(el) {
-    return Array.from(el.childNodes)
-      .filter((n) => n.nodeType === Node.TEXT_NODE)
-      .map((n) => n.nodeValue)
-      .join("");
   }
 
   /** `raw` is the paragraph's text exactly as the page had it, including the
@@ -87,9 +78,25 @@
   }
 
   function apply(item) {
-    const host = textHost(item.el);
+    if (state.fallback) return;
     const want = expectedText(item);
-    if (directText(host) !== want) setDirectText(host, want);
+    if (readNodes(item.nodes) !== want) writeNodes(item.nodes, want);
+  }
+
+  /**
+   * Stop replacing in place and hand the chapter to the reader tab. Puts the
+   * original text back first: a page left half-English with no way to finish
+   * is worse than the Chinese it started as. (Milestone 5 fallback, §5.1.)
+   */
+  function abandon(reason) {
+    if (state.fallback) return;
+    state.observer?.disconnect();
+    for (const item of state.items) {
+      if (item.nodes[0]?.isConnected && readNodes(item.nodes) !== item.raw) writeNodes(item.nodes, item.raw);
+    }
+    state.fallback = reason;
+    chrome.runtime.sendMessage({ type: "page:fallback", reason }).catch(() => {});
+    showPill({ text: `${reason} Showing the translation in a reader tab instead.` });
   }
 
   /**
@@ -105,15 +112,17 @@
    */
   function guard() {
     state.observer?.disconnect();
-    const root = document.querySelector("main.content");
+    const root = state.adapter?.contentRoot(document);
     if (!root) return;
     state.observer = new MutationObserver(() => {
-      if (state.items.some((it) => !it.el.isConnected)) rebind();
+      if (state.fallback) return;
+      if (state.items.some((it) => !it.nodes[0]?.isConnected)) {
+        if (!rebind()) return;
+      }
       let fixed = 0;
       for (const item of state.items) {
-        const host = textHost(item.el);
-        if (directText(host) !== expectedText(item)) {
-          setDirectText(host, expectedText(item));
+        if (readNodes(item.nodes) !== expectedText(item)) {
+          writeNodes(item.nodes, expectedText(item));
           fixed++;
         }
       }
@@ -125,19 +134,24 @@
     state.observer.observe(root, { childList: true, subtree: true, characterData: true });
   }
 
-  /** The page replaced paragraph elements outright: find the new ones by position. */
+  /**
+   * The page replaced paragraph nodes outright: find the new ones by
+   * position. Returns false — and falls back to the reader tab — when that
+   * is not possible, because the page now has a different number of
+   * paragraphs and position no longer identifies anything.
+   */
   function rebind() {
     const fresh = state.adapter?.extractChapter(document);
-    if (!fresh || fresh.chapterId !== state.chapterId) return;
+    if (!fresh || fresh.chapterId !== state.chapterId) return false;
     // Re-extracting reads the text now on the page, which may already be our
     // English — so match by position only, never by content.
     if (fresh.paragraphs.length !== state.items.length) {
-      console.warn("[webnovel-translator] page re-rendered with a different paragraph count; stopped replacing");
-      state.observer?.disconnect();
-      return;
+      abandon("The page rearranged its paragraphs mid-translation.");
+      return false;
     }
-    fresh.paragraphs.forEach((p, i) => { state.items[i].el = p.el; });
+    fresh.paragraphs.forEach((p, i) => { state.items[i].nodes = p.nodes; });
     guard();
+    return true;
   }
 
   // --------------------------------------------------------------- the pill
@@ -206,8 +220,8 @@
     ping: () => ({}),
 
     /** Extract the chapter. With `prime` (start of a run), also keep the live
-     *  elements for replacement and reset the replacement state; without it
-     *  (fixture export), leave an existing translation on the page alone. */
+     *  text nodes for replacement and reset the replacement state; without
+     *  it (fixture export), leave an existing translation on the page alone. */
     async "extract-chapter"(msg) {
       const { adapterForUrl } = await loadAdapters();
       const adapter = adapterForUrl(location.href);
@@ -228,12 +242,21 @@
       state.adapter = adapter;
       state.chapterId = chapter.chapterId;
       state.items = chapter.paragraphs.map((p, i) => ({
-        el: p.el,
+        nodes: p.nodes,
         zh: p.zh,
-        raw: previous ? previous[i].raw : directText(textHost(p.el)),
+        raw: previous ? previous[i].raw : readNodes(p.nodes),
         en: "",
       }));
       state.showing = "en";
+      state.fallback = null;
+      // A paragraph the adapter cannot rewrite cleanly (formatting inside the
+      // prose) would come out half-translated in place. Decide before
+      // touching the page, not after.
+      const unsafe = chapter.paragraphs.filter((p) => p.unsafe).length;
+      if (unsafe) {
+        state.fallback = `${unsafe} paragraph(s) on this page have formatting inside the text, so they can't be replaced cleanly.`;
+        return { chapter: adapter.toPayload(chapter), fallback: state.fallback };
+      }
       guard();
       return { chapter: adapter.toPayload(chapter) };
     },
@@ -247,7 +270,14 @@
       });
       // `quiet`: a glossary rename pushed into an already-finished page —
       // update the text, but it is not a run and must not say "Translating".
-      if (!msg.quiet) showPill({ text: `Translating ${msg.done}/${msg.total}`, running: true });
+      if (!msg.quiet) {
+        showPill({
+          text: state.fallback
+            ? `Translating ${msg.done}/${msg.total} · opens in a reader tab when done`
+            : `Translating ${msg.done}/${msg.total}`,
+          running: true,
+        });
+      }
       return {};
     },
 
@@ -292,7 +322,7 @@
   // arrival from here would race that into a duplicate run.
   if (!globalThis.__webnovelTranslatorInjected) {
     HANDLERS["extract-chapter"]({ prime: true })
-      .then(({ chapter }) => chrome.runtime.sendMessage({ type: "page:arrived", chapter }))
+      .then(({ chapter, fallback }) => chrome.runtime.sendMessage({ type: "page:arrived", chapter, fallback }))
       .catch(() => { /* not a readable chapter page: nothing to announce */ });
   }
 })();
