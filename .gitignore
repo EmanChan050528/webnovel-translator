@@ -1,0 +1,5 @@
+node_modules/
+# Captured chapter text is copyrighted: keep it local, never in the repo.
+eval/fixtures/
+*.log
+.DS_Store

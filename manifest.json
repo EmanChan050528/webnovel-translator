@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Webnovel Translator — Chinese to English, in place",
+  "description": "Translates Chinese web novel chapters into English using a local model. Milestone 0-1: extracts a chapter and shows the translation in a reader tab.",
+  "version": "0.1.1",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:11434/*",
+    "https://www.qidian.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "Webnovel Translator"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.qidian.com/chapter/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/site-adapters/*.js"
+      ],
+      "matches": [
+        "https://www.qidian.com/*"
+      ]
+    }
+  ]
+}

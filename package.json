@@ -1,0 +1,11 @@
+{
+  "name": "webnovel-translator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chinese web novel -> English, in place, via local Ollama. See translator-design.md.",
+  "scripts": {
+    "translate": "node bin/translate.mjs",
+    "test": "node --test src/**/*.test.mjs"
+  }
+}
