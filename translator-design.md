@@ -4,8 +4,8 @@ A browser extension that takes a Chinese web novel chapter on a supported
 site, translates it with a **local model through Ollama**, and replaces the
 Chinese text with English directly on the page, paragraph by paragraph.
 
-> **Status: Milestones 0–5 done. Remaining: Milestone 6 (JP/KR, stretch)
-> and Milestone 7 (UI redesign).** This document is
+> **Status: released as 1.0.0 — Milestones 0–5 done (see CHANGELOG.md).
+> Remaining: Milestone 6 (JP/KR, stretch) and Milestone 7 (UI redesign).** This document is
 > written the way [JP Subs' design doc](../Translator%20Project/translator-design.md)
 > ended up, not the way it started: predictions are kept next to their
 > corrections rather than silently replaced, and every claim below is either

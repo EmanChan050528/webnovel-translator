@@ -6,9 +6,9 @@ Same posture as [JP Subs](../Translator%20Project), aimed at prose instead of
 subtitles. Full design rationale, what's built vs. not, and open risks: see
 [translator-design.md](translator-design.md).
 
-**Status:** early. Milestone 0 (site adapter for Qidian) is done. Milestone 1
-(translate a chapter, read the result) is proven from the command line; the
-extension shell exists but has not been loaded into a real browser yet.
+**Status:** 1.0.0, the first release — Milestones 0–5 of the brief. See
+[CHANGELOG.md](CHANGELOG.md). Japanese/Korean novels and a UI redesign are
+planned but not part of it.
 
 ## Setup
 
